@@ -1,0 +1,85 @@
+NAME: VAE_MOTIONX_EVAL_LOWMEM
+ACCELERATOR: 'gpu'
+PRECISION: '16-mixed'
+NUM_NODES: 1
+DEVICE: [0]
+
+TRAIN:
+  STAGE: vae
+  NUM_WORKERS: 2
+  BATCH_SIZE: 2
+  END_EPOCH: 1
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: ''
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 2e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: ${TRAIN.END_EPOCH}
+      eta_min: 1e-6
+
+EVAL:
+  BATCH_SIZE: 1
+  SPLIT: val
+  NUM_WORKERS: 1
+
+TEST:
+  CHECKPOINTS: experiments/mgpt/VAE_MOTIONX_PRETRAIN/checkpoints/min-how2sign_MPJPE_PA_handepoch=259.ckpt
+  SPLIT: test
+  BATCH_SIZE: 1
+  NUM_WORKERS: 1
+  REPLICATION_TIMES: 1
+  SAVE_PREDICTIONS: true
+
+DATASET:
+  target: mGPT.data.LargeMotion.LargeMotionDataModule
+  NFEATS: 133
+  LARGE:
+    MANIFEST: data/motionx/processed_manifest_motionx_soke133.jsonl
+    MEAN_PATH: data/motionx/motionx_mean_soke133.pt
+    STD_PATH: data/motionx/motionx_std_soke133.pt
+    NORMALIZE: true
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    UNIT_LEN: 4
+    SAMPLE_STRIDE: 1
+    FALLBACK_TO_TRAIN: true
+    CACHE_IN_MEMORY: false
+    SOURCE_DEFAULT: how2sign
+
+METRIC:
+  TYPE: ['MRMetrics']
+
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.0
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.default}
+    motion_vae: ${vq.re96}
+    hand_vae_cfg: ${vq.hand192}
+    rhand_vae_cfg: ${vq.hand192}
+
+LOGGER:
+  TYPE: ['wandb']
+  VAL_EVERY_STEPS: 1
+  WANDB:
+    params:
+      project: SLG_VAE_MOTIONX
+      offline: true

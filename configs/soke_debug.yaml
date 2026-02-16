@@ -1,0 +1,87 @@
+NAME: SOKE_DEBUG # Experiment names (调试版本)
+USE_RAW_VIDEO: false  
+ACCELERATOR: 'gpu' 
+NUM_NODES: 1
+DEVICE: [0,1,2,3] # 减少到4个GPU进行测试，避免通信复杂度
+
+TRAIN:
+  #---------------------------------
+  STAGE: lm_pretrain 
+  #---------------------------------
+  NUM_WORKERS: 8 # 减少worker数量，降低DataLoader负载
+  BATCH_SIZE: 16 # 减小batch size，降低GPU内存压力
+  END_EPOCH: 150 
+  RESUME: 'experiments/mgpt/SOKE_backup_2026-02-11_/checkpoints/last.ckpt' # 从上次继续训练
+  PRETRAINED: '' 
+  PRETRAINED_VAE: 'experiments/mgpt/vae/checkpoints/tokenizer.ckpt'
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 2e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+  
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: ${TRAIN.END_EPOCH}
+      eta_min: 1e-6
+
+EVAL:
+  BATCH_SIZE: 4 # 减小评估batch size
+  SPLIT: val
+
+TEST:
+  CHECKPOINTS: null
+  SPLIT: test
+  BATCH_SIZE: 4
+  REPLICATION_TIMES: 1
+  SAVE_PREDICTIONS: True
+
+DATASET:
+  target: mGPT.data.H2S.H2SDataModule
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix
+    ROOT: data/How2Sign
+    CSL_ROOT: data/CSL-Daily
+    PHOENIX_ROOT: data/Phoenix_2014T
+    MEAN_PATH: data/CSL-Daily/mean.pt
+    STD_PATH: data/CSL-Daily/std.pt
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 40
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+    STD_TEXT: False
+  CODE_PATH: TOKENS_h2s_csl_phoenix
+
+METRIC:
+  TYPE: ['TM2TMetrics']
+
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.0
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.mbart_h2s_csl_phoenix}
+    motion_vae: ${vq.re96}
+    hand_vae_cfg: ${vq.hand192}
+    rhand_vae_cfg: ${vq.hand192}
+
+LOGGER:
+  TYPE: ['wandb']
+  VAL_EVERY_STEPS: 5
+  WANDB:
+    params:
+      project: SLG_DEBUG
+      offline: true
