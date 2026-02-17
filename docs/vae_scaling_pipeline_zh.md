@@ -122,6 +122,8 @@ bash scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh
 说明：
 - 量化器为 `quantizer='rvq_ema_reset'`
 - 每个分支 `num_quantizers=4`，每层都保留 EMA+reset（含 dead code reset）
+- 当前容量设置：`body code_num=128`，`lhand/rhand code_num=256`，`code_dim=512`
+- 推荐 8x24GB 3090 起步批量：预训练 `TRAIN.BATCH_SIZE=64`（每卡），微调 `TRAIN.BATCH_SIZE=48`（每卡）
 - 预设 `EVAL/TEST.BATCH_SIZE=1` 且 `VAL_EVERY_STEPS` 很大，避免大规模预训练时评估阶段 OOM
 - 当前 RVQ 已完整支持 VAE 训练/重建评估；LM token 协议暂未扩展到 RVQ 多级 token
 
@@ -149,7 +151,8 @@ bash scripts/pipeline/train_vae_finetune_h2s_csl_ddp.sh
 
 如果你发现重建中“手指细节好，但手臂幅度/手与身体相对位置不稳”，可尝试 v2 配置：
 - `configs/vae/vae_finetune_h2s_csl_v2.yaml`
-- 变化：启用 `LAMBDA_VELOCITY=0.3`，并对 133 维特征做分段加权（`UPPER/HAND/FACE`）
+- 变化：启用 `LAMBDA_VELOCITY=0.3`，并对 133 维特征做分段加权（`PART_WEIGHTS`）
+- 新增：支持 `VELOCITY_PART_WEIGHTS`，可对速度项设置分部位倍率（等效分部位 velocity lambda）
 
 ```bash
 GPU_IDS=0,1,2,3 \

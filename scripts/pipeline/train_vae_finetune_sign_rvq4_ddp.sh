@@ -2,10 +2,10 @@
 set -euo pipefail
 
 CFG=${CFG:-"configs/vae/vae_finetune_sign_rvq4.yaml"}
-GPU_IDS=${GPU_IDS:-"0,1,2,3"}
+GPU_IDS=${GPU_IDS:-"0,1,2,3,4,5,6,7"}
 NUM_NODES=${NUM_NODES:-1}
 BATCH_SIZE=${BATCH_SIZE:-""}
-PRETRAINED_CKPT=${PRETRAINED_CKPT:-"experiments/mgpt/VAE_MOTIONX_PRETRAIN_RVQ4/checkpoints/last.ckpt"}
+PRETRAINED_CKPT=${PRETRAINED_CKPT:-"experiments/mgpt/VAE_MOTIONX_PRETRAIN_RVQ4_C128H256/checkpoints/last.ckpt"}
 
 DATASET_NAME=${DATASET_NAME:-"how2sign_csl_phoenix"}
 H2S_ROOT=${H2S_ROOT:-"data/How2Sign"}

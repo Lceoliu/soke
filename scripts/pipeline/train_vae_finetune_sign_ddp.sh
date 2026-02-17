@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CFG=${CFG:-"configs/vae/vae_finetune_sign.yaml"}
-GPU_IDS=${GPU_IDS:-"0,1"}
+GPU_IDS=${GPU_IDS:-"0,1,2,3,4,5,6,7"}
 NUM_NODES=${NUM_NODES:-1}
 BATCH_SIZE=${BATCH_SIZE:-""}
 PRETRAINED_CKPT=${PRETRAINED_CKPT:-""}

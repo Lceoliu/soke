@@ -43,6 +43,7 @@ class GPTLosses(BaseLosses):
         self.stage = stage
         recons_loss = cfg.LOSS.ABLATION.RECONS_LOSS
         self.part_weights_cfg = cfg.LOSS.get("PART_WEIGHTS", None)
+        self.velocity_part_weights_cfg = cfg.LOSS.get("VELOCITY_PART_WEIGHTS", None)
 
         # Define losses
         losses = []
@@ -103,6 +104,22 @@ class GPTLosses(BaseLosses):
         w[120:] = w_face
         return w.view(1, 1, -1)
 
+    def _build_velocity_part_weights(self, x: torch.Tensor):
+        """
+        Optional velocity reweighting for SOKE 133-dim layout.
+        Effective per-part lambda = LAMBDA_VELOCITY * VELOCITY_PART_WEIGHTS[part].
+        """
+        if self.velocity_part_weights_cfg is None or x.shape[-1] != 133:
+            return None
+        w_upper = float(self.velocity_part_weights_cfg.get("UPPER", 1.0))
+        w_hand = float(self.velocity_part_weights_cfg.get("HAND", 1.0))
+        w_face = float(self.velocity_part_weights_cfg.get("FACE", 1.0))
+        w = torch.ones((x.shape[-1],), device=x.device, dtype=x.dtype)
+        w[:30] = w_upper
+        w[30:120] = w_hand
+        w[120:] = w_face
+        return w.view(1, 1, -1)
+
     def update(self, rs_set):
         '''Update the losses'''
         total: float = 0.0
@@ -119,6 +136,10 @@ class GPTLosses(BaseLosses):
             if self._params['recons_velocity'] != 0.0:
                 vel_rst = rs_set['m_rst'][:, 1:, :] - rs_set['m_rst'][:, :-1, :]
                 vel_ref = rs_set['m_ref'][:, 1:, :] - rs_set['m_ref'][:, :-1, :]
+                vel_part_w = self._build_velocity_part_weights(vel_rst)
+                if vel_part_w is not None:
+                    vel_rst = vel_rst * vel_part_w
+                    vel_ref = vel_ref * vel_part_w
                 vel_lengths = [max(int(x) - 1, 0) for x in rs_set['length']]
                 if max(vel_lengths) > 0:
                     total += self._update_loss("recons_velocity", vel_rst, vel_ref, vel_lengths)

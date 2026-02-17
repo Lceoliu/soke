@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CFG=${CFG:-"configs/vae/large_vae_pretrain.yaml"}
-GPU_IDS=${GPU_IDS:-"0,1,2,3"}
+GPU_IDS=${GPU_IDS:-"0,1,2,3,4,5,6,7"}
 NUM_NODES=${NUM_NODES:-1}
 BATCH_SIZE=${BATCH_SIZE:-""}
 

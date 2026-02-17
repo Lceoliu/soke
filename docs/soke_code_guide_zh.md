@@ -261,7 +261,14 @@ bash start_train.sh configs/soke.yaml
 - `lm`: 语言模型配置（SOKE 用 mBART multi-head）
 - `task`: 当前任务（常见 `t2m`）
 
-### 6.4 `METRIC` 与 `TEST`
+### 6.4 `LOSS` 段（VAE 常用）
+- `LAMBDA_FEATURE`: 特征重建损失权重
+- `LAMBDA_VELOCITY`: 速度重建损失总权重
+- `LAMBDA_COMMIT`: VQ commit 损失权重
+- `PART_WEIGHTS`: 对 133 维特征重建项按 `UPPER/HAND/FACE` 分部位加权
+- `VELOCITY_PART_WEIGHTS`: 对速度项按 `UPPER/HAND/FACE` 分部位加权（等效分部位 velocity lambda）
+
+### 6.5 `METRIC` 与 `TEST`
 - `METRIC.TYPE`: 启用哪类指标（`MRMetrics`, `TM2TMetrics`, `M2TMetrics`）
 - `TEST.REPLICATION_TIMES`: 重复测试次数
 - `TEST.SAVE_PREDICTIONS`: 是否落盘预测结果
