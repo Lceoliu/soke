@@ -15,8 +15,7 @@ class QuantizeEMAReset(nn.Module):
         self.init = False
         self.code_sum = None
         self.code_count = None
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.register_buffer('codebook', torch.zeros(self.nb_code, self.code_dim).to(device))
+        self.register_buffer('codebook', torch.zeros(self.nb_code, self.code_dim))
 
     def _tile(self, x):
         nb_code_x, code_dim = x.shape
@@ -313,7 +312,7 @@ class QuantizeEMA(nn.Module):
         self.init = False
         self.code_sum = None
         self.code_count = None
-        self.register_buffer('codebook', torch.zeros(self.nb_code, self.code_dim).cuda())
+        self.register_buffer('codebook', torch.zeros(self.nb_code, self.code_dim))
 
     def _tile(self, x):
         nb_code_x, code_dim = x.shape
@@ -414,3 +413,103 @@ class QuantizeEMA(nn.Module):
         x_d = x_d.view(N, T, -1).permute(0, 2, 1).contiguous()   #(N, DIM, T)
         
         return x_d, commit_loss, perplexity
+
+
+class ResidualVQEMAReset(nn.Module):
+    """
+    Residual VQ stack with EMA+reset quantizers.
+    Each level quantizes the residual left by previous levels.
+    """
+
+    def __init__(
+        self,
+        nb_code,
+        code_dim,
+        mu=0.99,
+        num_quantizers=2,
+        aggregate="mean",
+    ):
+        super().__init__()
+        if num_quantizers < 1:
+            raise ValueError(f"num_quantizers must be >= 1, got {num_quantizers}")
+        if aggregate not in ("mean", "sum"):
+            raise ValueError(f"aggregate must be one of ['mean', 'sum'], got {aggregate}")
+        self.nb_code = nb_code
+        self.code_dim = code_dim
+        self.num_quantizers = int(num_quantizers)
+        self.aggregate = aggregate
+        self.layers = nn.ModuleList(
+            [QuantizeEMAReset(nb_code, code_dim, mu=mu) for _ in range(self.num_quantizers)]
+        )
+
+    def _reduce(self, values):
+        stacked = torch.stack(values, dim=0)
+        if self.aggregate == "sum":
+            return stacked.sum(dim=0)
+        return stacked.mean(dim=0)
+
+    def preprocess(self, x):
+        # NCT -> NTC -> [NT, C]
+        x = x.permute(0, 2, 1).contiguous()
+        x = x.view(-1, x.shape[-1])
+        return x
+
+    def quantize(self, x):
+        # x: [NT, C] -> code idx [NT, Q]
+        residual = x
+        indices = []
+        for layer in self.layers:
+            code_idx = layer.quantize(residual)
+            quantized = layer.dequantize(code_idx)
+            residual = residual - quantized
+            indices.append(code_idx)
+        return torch.stack(indices, dim=-1)
+
+    def dequantize(self, code_idx):
+        """
+        Accepts:
+        - [T] (single-level legacy style)
+        - [T, Q] (common RVQ decode path)
+        - [B, T, Q]
+        Returns:
+        - [..., C] where C is code_dim
+        """
+        if code_idx.dim() == 1:
+            flat_idx = code_idx.view(-1, 1)
+            out_shape = (code_idx.shape[0],)
+        elif code_idx.dim() == 2 and code_idx.shape[-1] != self.num_quantizers:
+            # Treat as [..., 1] legacy shape (e.g., [B, T] when Q=1)
+            flat_idx = code_idx.reshape(-1, 1)
+            out_shape = tuple(code_idx.shape)
+        else:
+            flat_idx = code_idx.reshape(-1, code_idx.shape[-1])
+            out_shape = tuple(code_idx.shape[:-1])
+
+        used_levels = flat_idx.shape[-1]
+        if used_levels > self.num_quantizers:
+            raise ValueError(
+                f"Input uses {used_levels} quantizer levels, but model has only {self.num_quantizers}"
+            )
+
+        quantized = None
+        for level in range(used_levels):
+            q = self.layers[level].dequantize(flat_idx[:, level])
+            quantized = q if quantized is None else (quantized + q)
+        return quantized.view(*out_shape, self.code_dim).contiguous()
+
+    def forward(self, x):
+        # x: [N, C, T]
+        residual = x
+        quantized_total = torch.zeros_like(x)
+        commit_losses = []
+        perplexities = []
+
+        for layer in self.layers:
+            quantized, commit_loss, perplexity = layer(residual)
+            quantized_total = quantized_total + quantized
+            # Stop previous-level straight-through path when forming next residual.
+            residual = residual - quantized.detach()
+            commit_losses.append(commit_loss)
+            perplexities.append(perplexity)
+
+        return quantized_total, self._reduce(commit_losses), self._reduce(perplexities)

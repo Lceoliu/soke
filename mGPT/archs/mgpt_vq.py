@@ -6,7 +6,13 @@ import torch.nn as nn
 from torch import Tensor, nn
 from torch.distributions.distribution import Distribution
 from .tools.resnet import Resnet1D
-from .tools.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
+from .tools.quantize_cnn import (
+    QuantizeEMAReset,
+    Quantizer,
+    QuantizeEMA,
+    QuantizeReset,
+    ResidualVQEMAReset,
+)
 from collections import OrderedDict
 
 
@@ -17,6 +23,7 @@ class VQVae(nn.Module):
                  quantizer: str = "ema_reset",
                  code_num=512,
                  code_dim=512,
+                 num_quantizers=1,
                  output_emb_width=512,
                  down_t=3,
                  stride_t=2,
@@ -31,6 +38,7 @@ class VQVae(nn.Module):
         self.code_num = code_num
         self.code_dim = code_dim
         self.nfeats = nfeats
+        self.num_quantizers = int(num_quantizers)
 
         self.encoder = Encoder(nfeats,
                                output_emb_width,
@@ -60,6 +68,16 @@ class VQVae(nn.Module):
             self.quantizer = QuantizeEMA(code_num, code_dim, mu=0.99)
         elif quantizer == "reset":
             self.quantizer = QuantizeReset(code_num, code_dim)
+        elif quantizer in ["rvq_ema_reset", "rvq"]:
+            self.quantizer = ResidualVQEMAReset(
+                code_num,
+                code_dim,
+                mu=0.99,
+                num_quantizers=self.num_quantizers,
+                aggregate="mean",
+            )
+        else:
+            raise ValueError(f"Unsupported quantizer type: {quantizer}")
 
     def preprocess(self, x):
         # (bs, T, Jx3) -> (bs, Jx3, T)
@@ -103,7 +121,10 @@ class VQVae(nn.Module):
         # print('encoder: ', x_encoder.shape)
         code_idx = self.quantizer.quantize(x_encoder)
         # print('code_idx: ', code_idx.shape)
-        code_idx = code_idx.view(N, -1)
+        if code_idx.dim() == 1:
+            code_idx = code_idx.view(N, -1)
+        else:
+            code_idx = code_idx.view(N, -1, code_idx.shape[-1])
 
         # latent, dist
         return code_idx, None
@@ -111,7 +132,13 @@ class VQVae(nn.Module):
     def decode(self, z: Tensor):
 
         x_d = self.quantizer.dequantize(z)
-        x_d = x_d.view(1, -1, self.code_dim).permute(0, 2, 1).contiguous()
+        if x_d.dim() == 2:
+            x_d = x_d.unsqueeze(0)
+        elif x_d.dim() == 3:
+            pass
+        else:
+            raise ValueError(f"Unexpected dequantized tensor shape: {tuple(x_d.shape)}")
+        x_d = x_d.permute(0, 2, 1).contiguous()
 
         # decoder
         x_decoder = self.decoder(x_d)

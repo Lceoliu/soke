@@ -95,6 +95,20 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
     }
     # callbacks.append(ModelCheckpoint(**checkpointParams))
 
+    # Save the best checkpoint by validation total loss.
+    # `total/val` is logged in BaseLosses.loss2logname() + BaseModel.on_validation_epoch_end().
+    val_loss_ckpt_params = {
+        'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+        'filename': "min-val_loss-{epoch}",
+        'monitor': "total/val",
+        'mode': "min",
+        'save_top_k': 1,
+        'save_last': False,
+        'save_on_train_epoch_end': False,
+        'every_n_epochs': None,
+    }
+    callbacks.append(ModelCheckpoint(**val_loss_ckpt_params))
+
     metrics = cfg.METRIC.TYPE
     metric_monitor_map = {
         'TemosMetric': {

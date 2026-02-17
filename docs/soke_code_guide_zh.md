@@ -256,6 +256,8 @@ bash start_train.sh configs/soke.yaml
 ### 6.3 `model.params` 段
 - `motion_vae`: body tokenizer 配置（如 `vq.re96`）
 - `hand_vae_cfg` / `rhand_vae_cfg`: 手部 tokenizer
+- `motion_vae.params.quantizer`: 量化器类型（如 `ema_reset` 或 `rvq_ema_reset`）
+- `motion_vae.params.num_quantizers`: RVQ 级数（仅在 `rvq_ema_reset` 下生效）
 - `lm`: 语言模型配置（SOKE 用 mBART multi-head）
 - `task`: 当前任务（常见 `t2m`）
 
@@ -338,7 +340,43 @@ python3 scripts/tokenize_reconstruct_mesh_one.py \
   --tokenizer_ckpt experiments/mgpt/vae/checkpoints/tokenizer.ckpt
 ```
 
-### 8.4 Blender 高质量渲染
+### 8.4 原始 SMPL-X 数据体检（不经过 VQ/VAE）
+
+用于排查“数据本身有问题”还是“VQ-VAE 重建损失导致问题”。
+
+直接从原始提取的 SMPL-X 参数渲染 mesh：
+
+```bash
+python3 scripts/visualize_smplx_raw_mesh.py \
+  --pose_dir data/How2Sign/test/poses/<sample_name> \
+  --max_frames 120 \
+  --fps 18
+```
+
+如果你手里是 `npy` 序列：
+
+```bash
+# 179维（root/body/lhand/rhand/jaw/shape/expr）
+python3 scripts/visualize_smplx_raw_mesh.py \
+  --pose_npy <clip_179.npy> \
+  --input_type pose179
+
+# 133维标准化特征（需要mean/std反归一化）
+python3 scripts/visualize_smplx_raw_mesh.py \
+  --pose_npy <clip_133_norm.npy> \
+  --input_type feat133_norm \
+  --mean_path data/CSL-Daily/mean.pt \
+  --std_path data/CSL-Daily/std.pt
+```
+
+说明：
+- 输出目录：`visualize/raw_smplx_mesh/<sample_name>/`
+- 关键产物：`*_raw_mesh.mp4`
+- 脚本需要 CUDA（当前 `get_coord` 依赖 CUDA SMPL-X layer）
+- 若 OpenGL 初始化失败，可显式设置：`PYOPENGL_PLATFORM=egl` 或 `PYOPENGL_PLATFORM=osmesa`
+- 若视角仍有偏差，可调：`--mesh_rx_deg/--mesh_ry_deg/--mesh_rz_deg`
+
+### 8.5 Blender 高质量渲染
 
 ```bash
 python3 vis_blender.py

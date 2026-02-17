@@ -10,10 +10,14 @@
   - `scripts/pipeline/build_raw_manifest.sh`
   - `scripts/pipeline/prepare_large_vae_data.sh`
   - `scripts/pipeline/train_vae_pretrain_ddp.sh`
+  - `scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh`
   - `scripts/pipeline/train_vae_finetune_sign_ddp.sh`
 - 配置：
   - `configs/vae/large_vae_pretrain.yaml`
+  - `configs/vae/motionx_vae_pretrain_rvq4.yaml`
   - `configs/vae/vae_finetune_sign.yaml`
+  - `configs/vq/re96_rvq4.yaml`
+  - `configs/vq/hand192_rvq4.yaml`
 
 ---
 
@@ -100,6 +104,26 @@ bash scripts/pipeline/train_vae_pretrain_ddp.sh
 - 脚本会自动把 `GPU_IDS` 转为 `--device 0 1 ...`
 - 配置中使用 `mGPT.data.LargeMotion.LargeMotionDataModule`
 - 模型是 **纯 VAE stage**（`TRAIN.STAGE=vae`）
+
+### 4.1 RVQ 版本（细节增强）
+
+新增 RVQ 配置：
+- `configs/vae/motionx_vae_pretrain_rvq4.yaml`
+- body 使用 `vq.re96_rvq4`
+- hand/rhand 使用 `vq.hand192_rvq4`
+
+```bash
+GPU_IDS=0,1,2,3,4,5,6,7 \
+NUM_NODES=1 \
+CFG=configs/vae/motionx_vae_pretrain_rvq4.yaml \
+bash scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh
+```
+
+说明：
+- 量化器为 `quantizer='rvq_ema_reset'`
+- 每个分支 `num_quantizers=4`，每层都保留 EMA+reset（含 dead code reset）
+- 预设 `EVAL/TEST.BATCH_SIZE=1` 且 `VAL_EVERY_STEPS` 很大，避免大规模预训练时评估阶段 OOM
+- 当前 RVQ 已完整支持 VAE 训练/重建评估；LM token 协议暂未扩展到 RVQ 多级 token
 
 ---
 

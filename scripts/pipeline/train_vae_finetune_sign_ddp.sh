@@ -82,6 +82,18 @@ if "csl" in dn:
                     _ = pickle.load(f)
             except Exception as e:
                 errs.append(f"bad ann {p}: {e}")
+if "phoenix" in dn:
+    split_map = {"train": "train", "val": "dev", "test": "test"}
+    for sp in ["train", "val", "test"]:
+        p = os.path.join(h2s.PHOENIX_ROOT, f"phoenix14t.{split_map[sp]}")
+        if not os.path.exists(p):
+            errs.append(f"missing {p}")
+        else:
+            try:
+                with gzip.open(p, "rb") as f:
+                    _ = pickle.load(f)
+            except Exception as e:
+                errs.append(f"bad ann {p}: {e}")
 for p in [h2s.MEAN_PATH, h2s.STD_PATH]:
     if not os.path.exists(p):
         errs.append(f"missing {p}")

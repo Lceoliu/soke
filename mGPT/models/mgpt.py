@@ -59,6 +59,11 @@ class MotionGPT(BaseModel):
 
         # Freeze the motion tokenizer for lm training
         if 'lm' in self.hparams.stage:
+            if getattr(self.vae, "num_quantizers", 1) > 1:
+                raise NotImplementedError(
+                    "RVQ multi-level tokens are not yet wired into LM training/inference. "
+                    "Use STAGE=vae for RVQ, or switch quantizer to single-level for LM stages."
+                )
             self.vae.training = False
             for p in self.vae.parameters():
                 p.requires_grad = False
