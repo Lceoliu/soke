@@ -1,0 +1,99 @@
+NAME: VAE_SIGN_ABLATION_B_BODY_PRETRAINED_HAND_SCRATCH
+ACCELERATOR: 'gpu'
+PRECISION: '16-mixed'
+NUM_NODES: 1
+DEVICE: [0,1]
+
+TRAIN:
+  STAGE: vae
+  NUM_WORKERS: 16
+  BATCH_SIZE: 48
+  END_EPOCH: 120
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: ''
+  PRETRAINED_VAE_BODY: '/home/SOKE/experiments/mgpt/VAE_MOTIONX_PRETRAIN_RVQ4_C128H256/checkpoints/last.ckpt'
+  PRETRAINED_VAE_LOAD_BODY: true
+  PRETRAINED_VAE_LOAD_HAND: false
+  PRETRAINED_VAE_LOAD_RHAND: false
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: ${TRAIN.END_EPOCH}
+      eta_min: 1e-6
+
+EVAL:
+  BATCH_SIZE: 16
+  SPLIT: val
+  NUM_WORKERS: 8
+
+TEST:
+  CHECKPOINTS: null
+  SPLIT: test
+  BATCH_SIZE: 16
+  NUM_WORKERS: 8
+  REPLICATION_TIMES: 1
+  SAVE_PREDICTIONS: False
+
+DATASET:
+  target: mGPT.data.H2S.H2SDataModule
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix
+    ROOT: data/How2Sign
+    CSL_ROOT: data/CSL-Daily
+    PHOENIX_ROOT: data/Phoenix_2014T
+    MEAN_PATH: data/CSL-Daily/mean.pt
+    STD_PATH: data/CSL-Daily/std.pt
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 20
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+    STD_TEXT: False
+
+METRIC:
+  TYPE: ['MRMetrics']
+
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.3
+  VELOCITY_PART_WEIGHTS:
+    UPPER: 1.0
+    HAND: 0.0
+    FACE: 0.5
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  PART_WEIGHTS:
+    UPPER: 2.0
+    HAND: 2.0
+    FACE: 1.2
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.default}
+    motion_vae: ${vq.re96_rvq4}
+    hand_vae_cfg: ${vq.hand192_rvq4}
+    rhand_vae_cfg: ${vq.hand192_rvq4}
+
+LOGGER:
+  TYPE: ['wandb']
+  VAL_EVERY_STEPS: 10
+  WANDB:
+    params:
+      project: SLG_VAE_ABLATION
+      offline: true
+

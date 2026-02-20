@@ -8,7 +8,11 @@
 2. `docs/vae_scaling_pipeline_zh.md`  
    面向超大规模数据（含 MOTION-X 等）的 VAE 预训练与手语微调 Pipeline。
 
+3. `docs/data_onboarding_guide_zh.md`  
+   自定义数据接入指南（从视频+SMPL-X结果到可训练配置，含零改代码接入方案）。
+
 建议阅读顺序：
 
 1. 先读 `docs/soke_code_guide_zh.md` 理解仓库原始流程和数据格式。
 2. 再读 `docs/vae_scaling_pipeline_zh.md` 进行 scaling、预训练和迁移微调。
+3. 合作者接入自定义数据时，配合 `docs/data_onboarding_guide_zh.md` 执行落地流程。

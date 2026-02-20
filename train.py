@@ -73,8 +73,13 @@ def main():
     if cfg.TRAIN.PRETRAINED and not cfg.TRAIN.RESUME:
         load_pretrained(cfg, model, logger)
 
-    # Strict load vae model
-    if cfg.TRAIN.PRETRAINED_VAE:
+    # Strict load vae model (supports per-module checkpoint control)
+    if (
+        cfg.TRAIN.PRETRAINED_VAE
+        or cfg.TRAIN.get("PRETRAINED_VAE_BODY", "")
+        or cfg.TRAIN.get("PRETRAINED_VAE_HAND", "")
+        or cfg.TRAIN.get("PRETRAINED_VAE_RHAND", "")
+    ):
         load_pretrained_vae(cfg, model, logger)
 
     # Pytorch 2.0 Compile

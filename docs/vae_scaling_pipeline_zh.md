@@ -2,6 +2,7 @@
 
 本文档对应以下新增文件：
 - 数据模块：`mGPT/data/LargeMotion.py`
+- 自动后处理脚本：`scripts/analysis/auto_post_train_eval_vis.py`
 - 预处理脚本：
   - `scripts/pipeline/build_raw_manifest_from_scan.py`
   - `scripts/pipeline/preprocess_vae_corpus.py`
@@ -127,6 +128,25 @@ bash scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh
 - 预设 `EVAL/TEST.BATCH_SIZE=1` 且 `VAL_EVERY_STEPS` 很大，避免大规模预训练时评估阶段 OOM
 - 当前 RVQ 已完整支持 VAE 训练/重建评估；LM token 协议暂未扩展到 RVQ 多级 token
 
+### 4.2 训练后自动报告与可视化（默认开启）
+
+`train_vae_pretrain_ddp.sh` 和 `train_vae_pretrain_rvq4_ddp.sh` 在训练结束后会自动执行：
+
+1. Loss/Codebook 报告（调用 `scripts/analysis/generate_rvq_stage1_report.py`）
+2. train/test 抽样重建可视化（调用 `scripts/tokenize_reconstruct_mesh_one.py`）
+
+输出目录（位于实验目录下）：
+- `auto_reports/rvq_stage1`
+- `auto_vis/train`
+- `auto_vis/test`
+
+常用开关（环境变量）：
+- `AUTO_POST=0`：关闭自动后处理
+- `AUTO_POST_STRICT=1`：后处理失败时让脚本退出非零
+- `AUTO_POST_DEVICE=cuda|cpu`：后处理运行设备
+- `AUTO_REPORT_MAX_SAMPLES=3000`：报告统计样本上限
+- `AUTO_VIS_TRAIN=2`、`AUTO_VIS_TEST=2`：train/test 可视化样本数
+
 ---
 
 ## 5. 手语数据集微调（多卡）
@@ -171,6 +191,15 @@ bash scripts/pipeline/train_vae_finetune_h2s_csl_ddp.sh
 
 脚本会在启动前做快速数据检查（CSV/GZIP 标注、mean/std 文件）。
 
+### 5.1 微调阶段自动后处理
+
+`train_vae_finetune_sign_ddp.sh`（及其 wrapper）同样默认开启自动后处理，开关与预训练一致：
+
+```bash
+AUTO_POST=1 AUTO_POST_DEVICE=cuda AUTO_VIS_TRAIN=3 AUTO_VIS_TEST=3 \
+bash scripts/pipeline/train_vae_finetune_sign_rvq4_ddp.sh
+```
+
 ---
 
 ## 6. 关键实现点（适合超大数据）
@@ -189,3 +218,4 @@ bash scripts/pipeline/train_vae_finetune_h2s_csl_ddp.sh
 2. 若你的源数据不是 SMPL-X 179 或 SOKE 133，需要先做额外转换
 3. `configs/vae/large_vae_pretrain.yaml` 中 `VAL_EVERY_STEPS` 设置很大，默认近似关闭验证
 4. 若你需要在大语料上开启 MR 指标验证，请保证数据与 `feats2joints` 假设一致（SMPL-X 133）
+5. 自动后处理默认“尽量不打断训练流程”（失败只告警），若希望严格失败请显式设置 `AUTO_POST_STRICT=1`

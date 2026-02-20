@@ -9,6 +9,12 @@ BATCH_SIZE=${BATCH_SIZE:-""}
 LOG_DIR=${LOG_DIR:-"logs"}
 mkdir -p "$LOG_DIR"
 LOG_FILE=${LOG_FILE:-"$LOG_DIR/vae_pretrain_rvq4_$(date +%Y%m%d_%H%M%S).log"}
+AUTO_POST=${AUTO_POST:-1}
+AUTO_POST_STRICT=${AUTO_POST_STRICT:-0}
+AUTO_POST_DEVICE=${AUTO_POST_DEVICE:-"cuda"}
+AUTO_REPORT_MAX_SAMPLES=${AUTO_REPORT_MAX_SAMPLES:-3000}
+AUTO_VIS_TRAIN=${AUTO_VIS_TRAIN:-2}
+AUTO_VIS_TEST=${AUTO_VIS_TEST:-2}
 
 export NCCL_TIMEOUT=${NCCL_TIMEOUT:-7200}
 export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-1}
@@ -38,3 +44,24 @@ fi
 echo "Running command: ${CMD[*]}"
 echo "Logs: $LOG_FILE"
 "${CMD[@]}" 2>&1 | tee "$LOG_FILE"
+
+if [[ "$AUTO_POST" == "1" ]]; then
+  echo "[post] Running automatic report + visualization ..."
+  POST_CMD=(python3 scripts/analysis/auto_post_train_eval_vis.py
+    --cfg "$CFG"
+    --log_path "$LOG_FILE"
+    --device "$AUTO_POST_DEVICE"
+    --report_max_samples "$AUTO_REPORT_MAX_SAMPLES"
+    --vis_train_num "$AUTO_VIS_TRAIN"
+    --vis_test_num "$AUTO_VIS_TEST"
+  )
+  if [[ "$AUTO_POST_STRICT" == "1" ]]; then
+    POST_CMD+=(--strict)
+  fi
+  "${POST_CMD[@]}" || {
+    if [[ "$AUTO_POST_STRICT" == "1" ]]; then
+      exit 1
+    fi
+    echo "[post][WARN] automatic post-processing failed. continue."
+  }
+fi

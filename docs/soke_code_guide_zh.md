@@ -235,6 +235,27 @@ bash start_train.sh configs/soke.yaml
 - 训练时未传 `--nodebug` 可能进入 debug 逻辑（会改名字、降低验证间隔、WandB 离线）
 - 测试阶段代码会强制 `DEBUG=False`
 
+## 5.5 训练后自动评估与可视化（Bash 脚本）
+
+若使用 pipeline 脚本（如 `scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh`、`scripts/pipeline/train_vae_finetune_sign_ddp.sh`），训练结束后会自动执行：
+
+1. Loss/Codebook 报告生成（RVQ 场景）
+2. train/test 抽样重建视频生成（`tokenize_reconstruct_mesh_one.py`）
+
+主要开关（环境变量）：
+- `AUTO_POST=0`：关闭自动后处理
+- `AUTO_POST_STRICT=1`：后处理失败时返回非零
+- `AUTO_POST_DEVICE=cuda|cpu`：后处理设备
+- `AUTO_REPORT_MAX_SAMPLES=3000`：报告统计样本上限
+- `AUTO_VIS_TRAIN=2`、`AUTO_VIS_TEST=2`：可视化样本数
+
+示例：
+
+```bash
+AUTO_POST=1 AUTO_POST_DEVICE=cuda AUTO_VIS_TRAIN=3 AUTO_VIS_TEST=3 \
+bash scripts/pipeline/train_vae_finetune_sign_rvq4_ddp.sh
+```
+
 ---
 
 ## 6. 关键参数作用（按配置文件）
@@ -304,6 +325,10 @@ python3 test.py --cfg configs/soke.yaml --task t2m
 
 - 训练日志与 ckpt：`experiments/mgpt/{NAME}`
 - 测试结果与样本预测：`results/mgpt/{NAME}`
+- 若使用带自动后处理的 pipeline 脚本，还会新增：
+  - `experiments/mgpt/{NAME}/auto_reports/rvq_stage1`
+  - `experiments/mgpt/{NAME}/auto_vis/train`
+  - `experiments/mgpt/{NAME}/auto_vis/test`
 
 ---
 
