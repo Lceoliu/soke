@@ -49,6 +49,16 @@ def main():
     logger.info("model {} loaded".format(cfg.model.target))
 
     # Lightning Trainer
+    if len(cfg.DEVICE) > 1:
+        if "DDP_FIND_UNUSED_PARAMETERS" in cfg.TRAIN:
+            find_unused = bool(cfg.TRAIN.DDP_FIND_UNUSED_PARAMETERS)
+        else:
+            # VAE stage usually uses all params and can save memory with find_unused_parameters=False.
+            find_unused = False if str(cfg.TRAIN.STAGE) == "vae" else True
+        strategy = f"ddp_find_unused_parameters_{str(find_unused).lower()}"
+    else:
+        strategy = "auto"
+
     trainer_kwargs = dict(
         default_root_dir=cfg.FOLDER_EXP,
         max_epochs=cfg.TRAIN.END_EPOCH,
@@ -58,9 +68,11 @@ def main():
         accelerator=cfg.ACCELERATOR,
         devices=cfg.DEVICE,
         num_nodes=cfg.NUM_NODES,
-        strategy="ddp_find_unused_parameters_true" if len(cfg.DEVICE) > 1 else 'auto',
+        strategy=strategy,
         benchmark=False,
         deterministic=False,
+        num_sanity_val_steps=int(cfg.TRAIN.get("NUM_SANITY_VAL_STEPS", 0)),
+        accumulate_grad_batches=int(cfg.TRAIN.get("ACCUMULATE_GRAD_BATCHES", 1)),
     )
     if cfg.PRECISION is not None:
         trainer_kwargs["precision"] = cfg.PRECISION

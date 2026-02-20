@@ -16,10 +16,12 @@ AUTO_REPORT_MAX_SAMPLES=${AUTO_REPORT_MAX_SAMPLES:-3000}
 AUTO_VIS_TRAIN=${AUTO_VIS_TRAIN:-2}
 AUTO_VIS_TEST=${AUTO_VIS_TEST:-2}
 
-export NCCL_TIMEOUT=${NCCL_TIMEOUT:-7200}
-export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-1}
-export TORCH_NCCL_BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT:-1}
+export NCCL_TIMEOUT=${NCCL_TIMEOUT:-600}
+export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-0}
+export TORCH_NCCL_BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT:-0}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}
+export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True"}
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
@@ -43,7 +45,31 @@ fi
 
 echo "Running command: ${CMD[*]}"
 echo "Logs: $LOG_FILE"
-"${CMD[@]}" 2>&1 | tee "$LOG_FILE"
+TRAIN_PID=""
+cleanup_train() {
+  if [[ -n "$TRAIN_PID" ]] && kill -0 "$TRAIN_PID" 2>/dev/null; then
+    echo "[cleanup] terminating train pid=$TRAIN_PID"
+    pkill -TERM -P "$TRAIN_PID" 2>/dev/null || true
+    kill -TERM "$TRAIN_PID" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -P "$TRAIN_PID" 2>/dev/null || true
+    kill -KILL "$TRAIN_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup_train INT TERM
+set +e
+"${CMD[@]}" > >(tee "$LOG_FILE") 2>&1 &
+TRAIN_PID=$!
+wait "$TRAIN_PID"
+RC=$?
+set -e
+TRAIN_PID=""
+trap - INT TERM
+
+if [[ $RC -ne 0 ]]; then
+  echo "[FATAL] training failed with exit code $RC"
+  exit "$RC"
+fi
 
 if [[ "$AUTO_POST" == "1" ]]; then
   echo "[post] Running automatic report + visualization ..."

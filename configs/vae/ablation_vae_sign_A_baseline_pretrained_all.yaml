@@ -9,6 +9,8 @@ TRAIN:
   NUM_WORKERS: 16
   BATCH_SIZE: 48
   END_EPOCH: 120
+  NUM_SANITY_VAL_STEPS: 0
+  DDP_FIND_UNUSED_PARAMETERS: false
   RESUME: ''
   PRETRAINED: ''
   PRETRAINED_VAE: '/home/SOKE/experiments/mgpt/VAE_MOTIONX_PRETRAIN_RVQ4_C128H256/checkpoints/last.ckpt'
@@ -27,14 +29,14 @@ TRAIN:
       eta_min: 1e-6
 
 EVAL:
-  BATCH_SIZE: 16
+  BATCH_SIZE: 4
   SPLIT: val
   NUM_WORKERS: 8
 
 TEST:
   CHECKPOINTS: null
   SPLIT: test
-  BATCH_SIZE: 16
+  BATCH_SIZE: 4
   NUM_WORKERS: 8
   REPLICATION_TIMES: 1
   SAVE_PREDICTIONS: False
@@ -92,4 +94,3 @@ LOGGER:
     params:
       project: SLG_VAE_ABLATION
       offline: true
-
