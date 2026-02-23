@@ -1,26 +1,19 @@
 # Partially from https://github.com/Mael-zys/T2M-GPT
 
-from typing import List, Optional, Union
+from typing import Union
 import torch
 import torch.nn as nn
-from torch import Tensor, nn
+from torch import Tensor
 from torch.distributions.distribution import Distribution
 from .tools.resnet import Resnet1D
-from .tools.quantize_cnn import (
-    QuantizeEMAReset,
-    Quantizer,
-    QuantizeEMA,
-    QuantizeReset,
-    ResidualVQEMAReset,
-)
-from collections import OrderedDict
+from .tools.quantize_lfq import ResidualLFQ
 
 
 class VQVae(nn.Module):
 
     def __init__(self,
                  nfeats: int,
-                 quantizer: str = "ema_reset",
+                 quantizer: str = "lfq",
                  code_num=512,
                  code_dim=512,
                  num_quantizers=1,
@@ -60,24 +53,31 @@ class VQVae(nn.Module):
                                activation=activation,
                                norm=norm)
 
-        if quantizer == "ema_reset":
-            self.quantizer = QuantizeEMAReset(code_num, code_dim, mu=0.99)
-        elif quantizer == "orig":
-            self.quantizer = Quantizer(code_num, code_dim, beta=1.0)
-        elif quantizer == "ema":
-            self.quantizer = QuantizeEMA(code_num, code_dim, mu=0.99)
-        elif quantizer == "reset":
-            self.quantizer = QuantizeReset(code_num, code_dim)
-        elif quantizer in ["rvq_ema_reset", "rvq"]:
-            self.quantizer = ResidualVQEMAReset(
-                code_num,
-                code_dim,
-                mu=0.99,
-                num_quantizers=self.num_quantizers,
-                aggregate="mean",
+        if quantizer != "lfq":
+            raise ValueError(
+                f"This branch only supports LFQ quantizer, got: {quantizer}. "
+                "Please set quantizer='lfq' in config."
             )
-        else:
-            raise ValueError(f"Unsupported quantizer type: {quantizer}")
+
+        self.quantize_in = (
+            nn.Identity()
+            if output_emb_width == code_dim
+            else nn.Conv1d(output_emb_width, code_dim, kernel_size=1)
+        )
+        self.quantize_out = (
+            nn.Identity()
+            if output_emb_width == code_dim
+            else nn.Conv1d(code_dim, output_emb_width, kernel_size=1)
+        )
+
+        self.quantizer = ResidualLFQ(
+            nb_code=code_num,
+            code_dim=code_dim,
+            num_quantizers=self.num_quantizers,
+            aggregate="mean",
+            ste_temperature=float(kwargs.get("lfq_ste_temperature", 1.0)),
+            entropy_loss_weight=float(kwargs.get("lfq_entropy_loss_weight", 0.0)),
+        )
 
     def preprocess(self, x):
         # (bs, T, Jx3) -> (bs, Jx3, T)
@@ -95,10 +95,12 @@ class VQVae(nn.Module):
 
         # Encode
         x_encoder = self.encoder(x_in)
+        x_encoder = self.quantize_in(x_encoder)
         # print('encoder: ', x_encoder.shape)
 
         # quantization
         x_quantized, loss, perplexity = self.quantizer(x_encoder)
+        x_quantized = self.quantize_out(x_quantized)
         # print('quantized: ', x_quantized.shape)
 
         # decoder
@@ -115,6 +117,7 @@ class VQVae(nn.Module):
         N, T, _ = features.shape
         x_in = self.preprocess(features)
         x_encoder = self.encoder(x_in)
+        x_encoder = self.quantize_in(x_encoder)
         x_encoder = self.postprocess(x_encoder)
         x_encoder = x_encoder.contiguous().view(-1,
                                                 x_encoder.shape[-1])  # (NT, C)
@@ -139,6 +142,7 @@ class VQVae(nn.Module):
         else:
             raise ValueError(f"Unexpected dequantized tensor shape: {tuple(x_d.shape)}")
         x_d = x_d.permute(0, 2, 1).contiguous()
+        x_d = self.quantize_out(x_d)
 
         # decoder
         x_decoder = self.decoder(x_d)

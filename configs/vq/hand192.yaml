@@ -1,8 +1,12 @@
 target: mGPT.archs.mgpt_vq.VQVae
 params:
-  quantizer: 'ema_reset'
-  code_num: 192
+  quantizer: 'lfq'
+  num_quantizers: 1
+  # Legacy filename kept for compatibility; LFQ uses power-of-two code_num.
+  code_num: 256
   code_dim: 512
+  lfq_ste_temperature: 1.0
+  lfq_entropy_loss_weight: 0.0
   output_emb_width: 512
   down_t: 2
   stride_t: 2

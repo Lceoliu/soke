@@ -1,8 +1,11 @@
 target: mGPT.archs.mgpt_vq.VQVae
 params:
-  quantizer: 'ema_reset'
+  quantizer: 'lfq'
+  num_quantizers: 1
   code_num: 512
   code_dim: 512
+  lfq_ste_temperature: 1.0
+  lfq_entropy_loss_weight: 0.0
   output_emb_width: 512
   down_t: 2
   stride_t: 2
