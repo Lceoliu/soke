@@ -68,6 +68,7 @@ LOSS:
   LAMBDA_PRIOR: 0.0 # Lambda for diffusion prior losses
 
   LAMBDA_VELOCITY: 0.5 # Lambda for velocity losses
+  LAMBDA_FK_HAND: 0.0 # Lambda for hand FK (SMPL-X joint) losses
   LAMBDA_COMMIT: 0.02 # Lambda for commitment losses
 
   ABLATION:

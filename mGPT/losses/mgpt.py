@@ -31,6 +31,8 @@ class SmoothL1LossWithMask(nn.Module):
         if length is not None:
             # mask paddings
             mask = create_mask(length, pred.device)
+            while mask.dim() < pred.dim():
+                mask = mask.unsqueeze(-1)
             pred = pred*mask
             target = target*mask
         return F.smooth_l1_loss(pred, target)
@@ -54,6 +56,9 @@ class GPTLosses(BaseLosses):
 
             losses.append("recons_velocity")
             params['recons_velocity'] = cfg.LOSS.LAMBDA_VELOCITY
+
+            losses.append("recons_fk_hand")
+            params['recons_fk_hand'] = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
 
             losses.append("vq_commit")
             params['vq_commit'] = cfg.LOSS.LAMBDA_COMMIT
@@ -143,6 +148,22 @@ class GPTLosses(BaseLosses):
                 vel_lengths = [max(int(x) - 1, 0) for x in rs_set['length']]
                 if max(vel_lengths) > 0:
                     total += self._update_loss("recons_velocity", vel_rst, vel_ref, vel_lengths)
+            if self._params['recons_fk_hand'] != 0.0:
+                fk_lhand_rst = rs_set.get('fk_lhand_rst', None)
+                fk_lhand_ref = rs_set.get('fk_lhand_ref', None)
+                fk_rhand_rst = rs_set.get('fk_rhand_rst', None)
+                fk_rhand_ref = rs_set.get('fk_rhand_ref', None)
+                if (
+                    fk_lhand_rst is not None and fk_lhand_ref is not None
+                    and fk_rhand_rst is not None and fk_rhand_ref is not None
+                ):
+                    # Hand FK loss:
+                    # - fk_* tensors are wrist-relative SMPL-X hand joints.
+                    # - Concatenate left/right hand joints, then apply masked reconstruction
+                    #   loss over valid sequence length (same mask rule as feature loss).
+                    fk_rst = torch.cat([fk_lhand_rst, fk_rhand_rst], dim=2)
+                    fk_ref = torch.cat([fk_lhand_ref, fk_rhand_ref], dim=2)
+                    total += self._update_loss("recons_fk_hand", fk_rst, fk_ref, rs_set['length'])
             total += self._update_loss("vq_commit", rs_set['loss_commit'],
                                        rs_set['loss_commit'])
 

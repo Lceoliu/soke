@@ -11,6 +11,7 @@ from mGPT.models.base import BaseModel
 from .base import BaseModel
 import json
 import mGPT.render.matplot.plot_3d_global as plot_3d
+from mGPT.utils.human_models import get_coord, smpl_x
 
 
 class MotionGPT(BaseModel):
@@ -87,10 +88,79 @@ class MotionGPT(BaseModel):
 
         # Data transform
         self.feats2joints = datamodule.feats2joints
+        self.lambda_fk_hand = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
+        self.register_buffer(
+            "_smplx_shape_template",
+            torch.tensor(
+                [[[-0.07284723, 0.1795129, -0.27608207, 0.135155, 0.10748172,
+                   0.16037364, -0.01616933, -0.03450319, 0.01369138, 0.01108842]]],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_smplx_lhand_idx",
+            torch.tensor(list(smpl_x.joint_part2idx["lhand"]), dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_smplx_rhand_idx",
+            torch.tensor(list(smpl_x.joint_part2idx["rhand"]), dtype=torch.long),
+            persistent=False,
+        )
 
         # Count codebook frequency
         self.codePred = []
         self.codeFrequency = torch.zeros((self.hparams.codebook_size, ))
+
+    def _denormalize_motion(self, features: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(self.datamodule.hparams.mean, device=features.device, dtype=features.dtype)
+        std = torch.as_tensor(self.datamodule.hparams.std, device=features.device, dtype=features.dtype)
+        return features * std + mean
+
+    def _compute_hand_fk_joints(self, features_norm: torch.Tensor):
+        if features_norm.shape[-1] != 133:
+            return None, None
+
+        # FK path used by hand loss:
+        # 1) Denormalize 133-dim training features back to SMPL-X pose space.
+        # 2) Rebuild a full 169-dim SMPL-X parameter vector by prepending 36 zeros
+        #    (keeps the same convention as datamodule.feats2joints).
+        # 3) Run SMPL-X forward (get_coord) to obtain joints in camera-centered
+        #    global coordinates.
+        #
+        # Origin / frame:
+        # - Use wrist-relative hand coordinates for loss supervision:
+        #   left_hand_rel = left_hand_joints - left_wrist,
+        #   right_hand_rel = right_hand_joints - right_wrist.
+        # - This removes global translation drift and focuses loss on hand articulation.
+        #
+        # Hand joint selection:
+        # - Use smpl_x.joint_part2idx["lhand"/"rhand"] indices to avoid hard-coded ids.
+        features = self._denormalize_motion(features_norm)
+        bsz, tlen = features.shape[:2]
+        zero_pose = torch.zeros((bsz, tlen, 36), device=features.device, dtype=features.dtype)
+        shape_param = self._smplx_shape_template.to(features).repeat(bsz, tlen, 1).view(bsz * tlen, -1)
+        features = torch.cat([zero_pose, features], dim=-1).view(bsz * tlen, -1)
+
+        _, joints = get_coord(
+            root_pose=features[..., 0:3],
+            body_pose=features[..., 3:66],
+            lhand_pose=features[..., 66:111],
+            rhand_pose=features[..., 111:156],
+            jaw_pose=features[..., 156:159],
+            shape=shape_param,
+            expr=features[..., 159:169],
+            return_verts=False,
+        )
+        joints = joints.view(bsz, tlen, joints.shape[1], 3)
+        joints_lhand = joints.index_select(2, self._smplx_lhand_idx.to(joints.device))
+        joints_rhand = joints.index_select(2, self._smplx_rhand_idx.to(joints.device))
+        l_wrist = joints[:, :, smpl_x.J_regressor_idx["lwrist"]:smpl_x.J_regressor_idx["lwrist"] + 1, :]
+        r_wrist = joints[:, :, smpl_x.J_regressor_idx["rwrist"]:smpl_x.J_regressor_idx["rwrist"] + 1, :]
+        joints_lhand = joints_lhand - l_wrist
+        joints_rhand = joints_rhand - r_wrist
+        return joints_lhand, joints_rhand
 
     def forward(self, batch, task="t2m"):
         texts = batch["text"]
@@ -431,6 +501,7 @@ class MotionGPT(BaseModel):
         feats_ref = batch["motion"]
         joints_ref = None #self.feats2joints(feats_ref)
         feats_rst_hand = feats_rst_re = loss_commit_hand = loss_commit_re = perplexity_re = perplexity_hand = None
+        fk_lhand_rst = fk_rhand_rst = fk_lhand_ref = fk_rhand_ref = None
         # motion encode & decode
         if self.hand_vae_cfg is None:
             feats_rst, loss_commit, perplexity = self.vae(feats_ref)
@@ -464,7 +535,19 @@ class MotionGPT(BaseModel):
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_lhand, feats_rst_rhand, feats_rst_re[..., 30:], feats_rst_face], dim=-1)
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re + loss_commit_face
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re + perplexity_face
-            
+
+        if self.lambda_fk_hand > 0.0 and feats_ref.shape[-1] == 133:
+            # Compute FK joints in one batched SMPL-X pass for both prediction/reference
+            # to reduce overhead and guarantee identical FK pipeline.
+            feats_both = torch.cat([feats_rst, feats_ref.detach()], dim=0)
+            joints_lhand_both, joints_rhand_both = self._compute_hand_fk_joints(feats_both)
+            if joints_lhand_both is not None and joints_rhand_both is not None:
+                bsz = feats_ref.shape[0]
+                fk_lhand_rst = joints_lhand_both[:bsz]
+                fk_rhand_rst = joints_rhand_both[:bsz]
+                fk_lhand_ref = joints_lhand_both[bsz:].detach()
+                fk_rhand_ref = joints_rhand_both[bsz:].detach()
+
         joints_rst = None #self.feats2joints(feats_rst)
         # return set
         rs_set = {
@@ -474,7 +557,11 @@ class MotionGPT(BaseModel):
             "joints_rst": joints_rst,
             "loss_commit": loss_commit,
             "perplexity": perplexity,
-            "length": batch['length']
+            "length": batch['length'],
+            "fk_lhand_rst": fk_lhand_rst,
+            "fk_rhand_rst": fk_rhand_rst,
+            "fk_lhand_ref": fk_lhand_ref,
+            "fk_rhand_ref": fk_rhand_ref,
         }
         return rs_set
 
