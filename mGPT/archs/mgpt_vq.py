@@ -76,7 +76,10 @@ class VQVae(nn.Module):
             num_quantizers=self.num_quantizers,
             aggregate="mean",
             ste_temperature=float(kwargs.get("lfq_ste_temperature", 1.0)),
-            entropy_loss_weight=float(kwargs.get("lfq_entropy_loss_weight", 0.0)),
+            ste_temperature_end=float(kwargs.get("lfq_ste_temperature_end", 0.1)),
+            entropy_loss_weight=float(kwargs.get("lfq_entropy_loss_weight", 0.1)),
+            entropy_global_weight=float(kwargs.get("lfq_entropy_global_weight", 1.0)),
+            entropy_local_weight=float(kwargs.get("lfq_entropy_local_weight", 1.0)),
         )
 
     def preprocess(self, x):

@@ -61,8 +61,9 @@ class MotionGPT(BaseModel):
         if 'lm' in self.hparams.stage:
             if getattr(self.vae, "num_quantizers", 1) > 1:
                 raise NotImplementedError(
-                    "RVQ multi-level tokens are not yet wired into LM training/inference. "
-                    "Use STAGE=vae for RVQ, or switch quantizer to single-level for LM stages."
+                    "Multi-level quantizer tokens are not yet wired into LM training/inference. "
+                    "Use STAGE=vae for multi-level tokenizer training, or switch to single-level "
+                    "quantization for LM stages."
                 )
             self.vae.training = False
             for p in self.vae.parameters():
@@ -162,6 +163,24 @@ class MotionGPT(BaseModel):
         outputs = self.lm(texts, tokens_ref, lengths, tasks, src=batch['src'], name=batch['name'])
         # outputs = self.t2m_gpt.generate(texts)
         return {'outputs': outputs}
+
+    def _set_lfq_temperature_progress(self, progress: float):
+        for name in ["vae", "hand_vae", "rhand_vae", "face_vae"]:
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            quantizer = getattr(module, "quantizer", None)
+            if quantizer is None:
+                continue
+            if hasattr(quantizer, "set_anneal_progress"):
+                quantizer.set_anneal_progress(progress)
+
+    def on_train_epoch_start(self):
+        if str(self.hparams.stage) != "vae":
+            return
+        total_epochs = max(int(self.hparams.cfg.TRAIN.END_EPOCH), 1)
+        progress = float(self.current_epoch) / float(max(total_epochs - 1, 1))
+        self._set_lfq_temperature_progress(progress)
 
     @torch.no_grad()
     def val_t2m_forward(self, batch, vis=False):

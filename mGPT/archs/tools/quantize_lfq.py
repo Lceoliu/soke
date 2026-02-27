@@ -19,7 +19,10 @@ class ResidualLFQ(nn.Module):
         num_quantizers: int = 1,
         aggregate: str = "mean",
         ste_temperature: float = 1.0,
-        entropy_loss_weight: float = 0.0,
+        ste_temperature_end: float = 0.1,
+        entropy_loss_weight: float = 0.1,
+        entropy_global_weight: float = 1.0,
+        entropy_local_weight: float = 1.0,
     ):
         super().__init__()
         if nb_code < 2:
@@ -35,8 +38,12 @@ class ResidualLFQ(nn.Module):
         self.code_dim = int(code_dim)
         self.num_quantizers = int(num_quantizers)
         self.aggregate = aggregate
+        self.ste_temperature_start = float(ste_temperature)
+        self.ste_temperature_end = float(ste_temperature_end)
         self.ste_temperature = float(ste_temperature)
         self.entropy_loss_weight = float(entropy_loss_weight)
+        self.entropy_global_weight = float(entropy_global_weight)
+        self.entropy_local_weight = float(entropy_local_weight)
 
         self.bits_per_code = int(math.ceil(math.log2(self.nb_code)))
         self.full_code_num = int(2 ** self.bits_per_code)
@@ -90,6 +97,23 @@ class ResidualLFQ(nn.Module):
         probs = counts / counts.sum().clamp_min(1.0)
         entropy = -(probs * (probs + 1e-7).log()).sum()
         return torch.exp(entropy)
+
+    def _global_bit_balance_loss(self, logits: torch.Tensor):
+        # Maximize global bit entropy by driving per-bit Bernoulli p to 0.5.
+        probs = torch.sigmoid(logits)
+        p_mean = probs.mean(dim=0)
+        return ((p_mean - 0.5) ** 2).mean()
+
+    def _local_bit_confidence_loss(self, logits: torch.Tensor):
+        # Minimize local bit entropy by making logits stay away from 0.
+        return torch.exp(-torch.abs(logits)).mean()
+
+    def set_anneal_progress(self, progress: float):
+        progress = float(max(0.0, min(1.0, progress)))
+        self.ste_temperature = (
+            self.ste_temperature_start
+            + (self.ste_temperature_end - self.ste_temperature_start) * progress
+        )
 
     def quantize(self, x: torch.Tensor):
         """
@@ -189,10 +213,12 @@ class ResidualLFQ(nn.Module):
             perplexities.append(self._compute_perplexity(code_idx))
 
             if self.entropy_loss_weight > 0.0:
-                counts = torch.bincount(code_idx.view(-1), minlength=self.nb_code).float()
-                probs = counts / counts.sum().clamp_min(1.0)
-                entropy = -(probs * (probs + 1e-7).log()).sum()
-                entropy_losses.append(-entropy)
+                global_loss = self._global_bit_balance_loss(logits)
+                local_loss = self._local_bit_confidence_loss(logits)
+                entropy_losses.append(
+                    self.entropy_global_weight * global_loss
+                    + self.entropy_local_weight * local_loss
+                )
 
             quantized_total = quantized_total + quantized
             residual = residual - quantized.detach()
