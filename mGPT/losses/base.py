@@ -63,6 +63,9 @@ class BaseLosses(nn.Module):
         if loss == "total":
             log_name = f"{loss}/{split}"
         else:
-            loss_type, name = loss.split("_")
+            if "_" in loss:
+                loss_type, name = loss.split("_", 1)
+            else:
+                loss_type, name = "loss", loss
             log_name = f"{loss_type}/{name}/{split}"
         return log_name
