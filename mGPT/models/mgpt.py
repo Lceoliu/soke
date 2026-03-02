@@ -89,6 +89,13 @@ class MotionGPT(BaseModel):
         # Data transform
         self.feats2joints = datamodule.feats2joints
         self.lambda_fk_hand = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
+        self.lambda_accel_hand = float(cfg.LOSS.get("LAMBDA_ACCEL_HAND", 0.0))
+        self.lambda_accel_wrist_rel = float(cfg.LOSS.get("LAMBDA_ACCEL_WRIST_REL", 0.0))
+        self._use_hand_fk_supervision = (
+            self.lambda_fk_hand > 0.0
+            or self.lambda_accel_hand > 0.0
+            or self.lambda_accel_wrist_rel > 0.0
+        )
         self.register_buffer(
             "_smplx_shape_template",
             torch.tensor(
@@ -120,7 +127,7 @@ class MotionGPT(BaseModel):
 
     def _compute_hand_fk_joints(self, features_norm: torch.Tensor):
         if features_norm.shape[-1] != 133:
-            return None, None
+            return None, None, None, None
 
         # FK path used by hand loss:
         # 1) Denormalize 133-dim training features back to SMPL-X pose space.
@@ -160,7 +167,7 @@ class MotionGPT(BaseModel):
         r_wrist = joints[:, :, smpl_x.J_regressor_idx["rwrist"]:smpl_x.J_regressor_idx["rwrist"] + 1, :]
         joints_lhand = joints_lhand - l_wrist
         joints_rhand = joints_rhand - r_wrist
-        return joints_lhand, joints_rhand
+        return joints_lhand, joints_rhand, l_wrist, r_wrist
 
     def forward(self, batch, task="t2m"):
         texts = batch["text"]
@@ -502,6 +509,7 @@ class MotionGPT(BaseModel):
         joints_ref = None #self.feats2joints(feats_ref)
         feats_rst_hand = feats_rst_re = loss_commit_hand = loss_commit_re = perplexity_re = perplexity_hand = None
         fk_lhand_rst = fk_rhand_rst = fk_lhand_ref = fk_rhand_ref = None
+        wrist_l_rst = wrist_r_rst = wrist_l_ref = wrist_r_ref = None
         # motion encode & decode
         if self.hand_vae_cfg is None:
             feats_rst, loss_commit, perplexity = self.vae(feats_ref)
@@ -536,17 +544,24 @@ class MotionGPT(BaseModel):
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re + loss_commit_face
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re + perplexity_face
 
-        if self.lambda_fk_hand > 0.0 and feats_ref.shape[-1] == 133:
+        if self._use_hand_fk_supervision and feats_ref.shape[-1] == 133:
             # Compute FK joints in one batched SMPL-X pass for both prediction/reference
             # to reduce overhead and guarantee identical FK pipeline.
             feats_both = torch.cat([feats_rst, feats_ref.detach()], dim=0)
-            joints_lhand_both, joints_rhand_both = self._compute_hand_fk_joints(feats_both)
-            if joints_lhand_both is not None and joints_rhand_both is not None:
+            joints_lhand_both, joints_rhand_both, joints_lwrist_both, joints_rwrist_both = self._compute_hand_fk_joints(feats_both)
+            if (
+                joints_lhand_both is not None and joints_rhand_both is not None
+                and joints_lwrist_both is not None and joints_rwrist_both is not None
+            ):
                 bsz = feats_ref.shape[0]
                 fk_lhand_rst = joints_lhand_both[:bsz]
                 fk_rhand_rst = joints_rhand_both[:bsz]
                 fk_lhand_ref = joints_lhand_both[bsz:].detach()
                 fk_rhand_ref = joints_rhand_both[bsz:].detach()
+                wrist_l_rst = joints_lwrist_both[:bsz]
+                wrist_r_rst = joints_rwrist_both[:bsz]
+                wrist_l_ref = joints_lwrist_both[bsz:].detach()
+                wrist_r_ref = joints_rwrist_both[bsz:].detach()
 
         joints_rst = None #self.feats2joints(feats_rst)
         # return set
@@ -562,6 +577,10 @@ class MotionGPT(BaseModel):
             "fk_rhand_rst": fk_rhand_rst,
             "fk_lhand_ref": fk_lhand_ref,
             "fk_rhand_ref": fk_rhand_ref,
+            "wrist_l_rst": wrist_l_rst,
+            "wrist_r_rst": wrist_r_rst,
+            "wrist_l_ref": wrist_l_ref,
+            "wrist_r_ref": wrist_r_ref,
         }
         return rs_set
 

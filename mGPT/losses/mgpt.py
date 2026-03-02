@@ -60,6 +60,12 @@ class GPTLosses(BaseLosses):
             losses.append("recons_fk_hand")
             params['recons_fk_hand'] = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
 
+            losses.append("recons_accel_hand")
+            params['recons_accel_hand'] = float(cfg.LOSS.get("LAMBDA_ACCEL_HAND", 0.0))
+
+            losses.append("recons_accel_wrist_rel")
+            params['recons_accel_wrist_rel'] = float(cfg.LOSS.get("LAMBDA_ACCEL_WRIST_REL", 0.0))
+
             losses.append("vq_commit")
             params['vq_commit'] = cfg.LOSS.LAMBDA_COMMIT
         elif stage in ["lm_pretrain", "lm_instruct"]:
@@ -164,6 +170,46 @@ class GPTLosses(BaseLosses):
                     fk_rst = torch.cat([fk_lhand_rst, fk_rhand_rst], dim=2)
                     fk_ref = torch.cat([fk_lhand_ref, fk_rhand_ref], dim=2)
                     total += self._update_loss("recons_fk_hand", fk_rst, fk_ref, rs_set['length'])
+            if self._params['recons_accel_hand'] != 0.0:
+                fk_lhand_rst = rs_set.get('fk_lhand_rst', None)
+                fk_lhand_ref = rs_set.get('fk_lhand_ref', None)
+                fk_rhand_rst = rs_set.get('fk_rhand_rst', None)
+                fk_rhand_ref = rs_set.get('fk_rhand_ref', None)
+                if (
+                    fk_lhand_rst is not None and fk_lhand_ref is not None
+                    and fk_rhand_rst is not None and fk_rhand_ref is not None
+                ):
+                    # Hand acceleration loss (wrist-relative):
+                    # - Compute 2nd-order temporal difference on wrist-relative hand joints.
+                    # - Concatenate left/right hands to supervise explosive finger motion.
+                    acc_lhand_rst = fk_lhand_rst[:, 2:, ...] - 2 * fk_lhand_rst[:, 1:-1, ...] + fk_lhand_rst[:, :-2, ...]
+                    acc_lhand_ref = fk_lhand_ref[:, 2:, ...] - 2 * fk_lhand_ref[:, 1:-1, ...] + fk_lhand_ref[:, :-2, ...]
+                    acc_rhand_rst = fk_rhand_rst[:, 2:, ...] - 2 * fk_rhand_rst[:, 1:-1, ...] + fk_rhand_rst[:, :-2, ...]
+                    acc_rhand_ref = fk_rhand_ref[:, 2:, ...] - 2 * fk_rhand_ref[:, 1:-1, ...] + fk_rhand_ref[:, :-2, ...]
+                    acc_rst = torch.cat([acc_lhand_rst, acc_rhand_rst], dim=2)
+                    acc_ref = torch.cat([acc_lhand_ref, acc_rhand_ref], dim=2)
+                    acc_lengths = [max(int(x) - 2, 0) for x in rs_set['length']]
+                    if max(acc_lengths) > 0:
+                        total += self._update_loss("recons_accel_hand", acc_rst, acc_ref, acc_lengths)
+            if self._params['recons_accel_wrist_rel'] != 0.0:
+                wrist_l_rst = rs_set.get('wrist_l_rst', None)
+                wrist_r_rst = rs_set.get('wrist_r_rst', None)
+                wrist_l_ref = rs_set.get('wrist_l_ref', None)
+                wrist_r_ref = rs_set.get('wrist_r_ref', None)
+                if (
+                    wrist_l_rst is not None and wrist_r_rst is not None
+                    and wrist_l_ref is not None and wrist_r_ref is not None
+                ):
+                    # Two-hand relative acceleration loss:
+                    # - Build global left->right wrist vector.
+                    # - Apply 2nd-order temporal difference on this relative vector.
+                    rel_vec_rst = wrist_r_rst - wrist_l_rst
+                    rel_vec_ref = wrist_r_ref - wrist_l_ref
+                    rel_acc_rst = rel_vec_rst[:, 2:, ...] - 2 * rel_vec_rst[:, 1:-1, ...] + rel_vec_rst[:, :-2, ...]
+                    rel_acc_ref = rel_vec_ref[:, 2:, ...] - 2 * rel_vec_ref[:, 1:-1, ...] + rel_vec_ref[:, :-2, ...]
+                    rel_acc_lengths = [max(int(x) - 2, 0) for x in rs_set['length']]
+                    if max(rel_acc_lengths) > 0:
+                        total += self._update_loss("recons_accel_wrist_rel", rel_acc_rst, rel_acc_ref, rel_acc_lengths)
             total += self._update_loss("vq_commit", rs_set['loss_commit'],
                                        rs_set['loss_commit'])
 
