@@ -9,6 +9,11 @@ BATCH_SIZE=${BATCH_SIZE:-""}
 
 # Body-only pretrained loading (hands remain random init).
 PRETRAINED_BODY_CKPT=${PRETRAINED_BODY_CKPT:-"/home/SOKE/experiments/mgpt/VAE_MOTIONX_PRETRAIN_LFQ4_C128H256/checkpoints/last.ckpt"}
+# Backward-compatible alias (if user passes PRETRAINED_CKPT, use it as body ckpt).
+PRETRAINED_CKPT=${PRETRAINED_CKPT:-""}
+if [[ -n "$PRETRAINED_CKPT" ]]; then
+  PRETRAINED_BODY_CKPT="$PRETRAINED_CKPT"
+fi
 
 # Optional dataset path overrides
 DATASET_NAME=${DATASET_NAME:-"how2sign_csl_phoenix"}
@@ -25,12 +30,19 @@ AUTO_POST_DEVICE=${AUTO_POST_DEVICE:-"cuda"}
 AUTO_REPORT_MAX_SAMPLES=${AUTO_REPORT_MAX_SAMPLES:-3000}
 AUTO_VIS_TRAIN=${AUTO_VIS_TRAIN:-2}
 AUTO_VIS_TEST=${AUTO_VIS_TEST:-2}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+
+if [[ "${CONDA_DEFAULT_ENV:-}" != "soke" && -f "/opt/conda/etc/profile.d/conda.sh" ]]; then
+  # Best effort only; keep script usable in non-conda environments.
+  source /opt/conda/etc/profile.d/conda.sh || true
+  conda activate soke >/dev/null 2>&1 || true
+fi
 
 RUN_CFG="$CFG"
 TMP_CFG=""
 if [[ -n "$PRETRAINED_BODY_CKPT" ]]; then
   TMP_CFG="/tmp/vae_finetune_sign_lfq4_fkhand_body_pretrained_$(date +%s).yaml"
-  python3 - <<PY
+  "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
 cfg = OmegaConf.load("$CFG")
 cfg.TRAIN.PRETRAINED_VAE_BODY = "$PRETRAINED_BODY_CKPT"
@@ -54,6 +66,7 @@ export CFG="$RUN_CFG"
 export GPU_IDS NUM_NODES BATCH_SIZE
 export DATASET_NAME H2S_ROOT CSL_ROOT PHOENIX_ROOT MEAN_PATH STD_PATH
 export AUTO_POST AUTO_POST_STRICT AUTO_POST_DEVICE AUTO_REPORT_MAX_SAMPLES AUTO_VIS_TRAIN AUTO_VIS_TEST
+export PYTHON_BIN
 
 echo "Launching FK-hand finetune:"
 echo "  CFG=$CFG"
@@ -62,4 +75,3 @@ echo "  GPU_IDS=$GPU_IDS"
 echo "  AUTO_POST=$AUTO_POST (report + vis)"
 
 bash scripts/pipeline/train_vae_finetune_sign_ddp.sh
-
