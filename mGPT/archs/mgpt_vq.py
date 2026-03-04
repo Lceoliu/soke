@@ -52,6 +52,15 @@ class VQVae(nn.Module):
                                dilation_growth_rate,
                                activation=activation,
                                norm=norm)
+        self.use_contact = bool(kwargs.get("use_contact", False))
+        self.num_contact_classes = int(kwargs.get("num_contact_classes", 3))
+        self.contact_head = None
+        if self.use_contact:
+            self.contact_head = nn.Sequential(
+                nn.Conv1d(width, 128, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv1d(128, self.num_contact_classes, kernel_size=1),
+            )
 
         if quantizer != "lfq":
             raise ValueError(
@@ -92,7 +101,7 @@ class VQVae(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
-    def forward(self, features: Tensor):
+    def forward(self, features: Tensor, return_aux: bool = False):
         # Preprocess
         x_in = self.preprocess(features)
 
@@ -107,10 +116,23 @@ class VQVae(nn.Module):
         # print('quantized: ', x_quantized.shape)
 
         # decoder
-        x_decoder = self.decoder(x_quantized)
+        if return_aux:
+            x_decoder, dec_hidden = self.decoder(x_quantized, return_hidden=True)
+        else:
+            x_decoder = self.decoder(x_quantized)
+            dec_hidden = None
         x_out = self.postprocess(x_decoder)
 
-        return x_out, loss, perplexity
+        if not return_aux:
+            return x_out, loss, perplexity
+
+        aux = {"decoder_hidden": dec_hidden}
+        if self.contact_head is not None and dec_hidden is not None:
+            # [B, 3, T]
+            aux["contact_logits"] = self.contact_head(dec_hidden)
+        else:
+            aux["contact_logits"] = None
+        return x_out, loss, perplexity, aux
 
     def encode(
         self,
@@ -204,10 +226,9 @@ class Decoder(nn.Module):
                  norm=None):
         super().__init__()
         blocks = []
-
         filter_t, pad_t = stride_t * 2, stride_t // 2
-        blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
-        blocks.append(nn.ReLU())
+        self.input_proj = nn.Conv1d(output_emb_width, width, 3, 1, 1)
+        self.input_act = nn.ReLU()
         for i in range(down_t):
             out_dim = width
             block = nn.Sequential(
@@ -221,10 +242,18 @@ class Decoder(nn.Module):
                                                  align_corners=False),
                 nn.Conv1d(width, out_dim, 3, 1, 1))
             blocks.append(block)
-        blocks.append(nn.Conv1d(width, width, 3, 1, 1))
-        blocks.append(nn.ReLU())
-        blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
-        self.model = nn.Sequential(*blocks)
+        self.upsample_blocks = nn.ModuleList(blocks)
+        self.pre_out = nn.Conv1d(width, width, 3, 1, 1)
+        self.pre_out_act = nn.ReLU()
+        self.out_proj = nn.Conv1d(width, input_emb_width, 3, 1, 1)
+        self.hidden_width = width
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, return_hidden: bool = False):
+        x = self.input_act(self.input_proj(x))
+        for block in self.upsample_blocks:
+            x = block(x)
+        hidden = self.pre_out_act(self.pre_out(x))
+        out = self.out_proj(hidden)
+        if return_hidden:
+            return out, hidden
+        return out

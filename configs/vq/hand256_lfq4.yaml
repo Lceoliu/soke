@@ -4,6 +4,8 @@ params:
   num_quantizers: 4
   code_num: 256
   code_dim: 512
+  use_contact: true
+  num_contact_classes: 3
   lfq_ste_temperature: 1.0
   lfq_ste_temperature_end: 0.1
   lfq_entropy_loss_weight: 0.1

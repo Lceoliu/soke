@@ -58,10 +58,11 @@ class BASEDataModule(pl.LightningDataModule):
         dataloader_options = self.dataloader_options.copy()
         dataloader_options["batch_size"] = self.cfg.TRAIN.BATCH_SIZE
         dataloader_options["num_workers"] = self.cfg.TRAIN.NUM_WORKERS
+        num_workers = int(dataloader_options["num_workers"])
         return DataLoader(
             self.train_dataset,
             shuffle=False,
-            persistent_workers=True,
+            persistent_workers=(num_workers > 0),
             **dataloader_options,
         )
 
@@ -71,9 +72,10 @@ class BASEDataModule(pl.LightningDataModule):
             "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
         dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
         dataloader_options["shuffle"] = False
+        num_workers = int(dataloader_options["num_workers"])
         return DataLoader(
             self.test_dataset,
-            persistent_workers=True,
+            persistent_workers=(num_workers > 0),
             **dataloader_options,
         )
 
@@ -83,9 +85,10 @@ class BASEDataModule(pl.LightningDataModule):
         dataloader_options["batch_size"] = self.cfg.EVAL.BATCH_SIZE
         dataloader_options["num_workers"] = self.cfg.EVAL.NUM_WORKERS
         dataloader_options["shuffle"] = False
+        num_workers = int(dataloader_options["num_workers"])
         return DataLoader(
             self.val_dataset,
-            persistent_workers=True,
+            persistent_workers=(num_workers > 0),
             **dataloader_options,
         )
 
@@ -96,8 +99,9 @@ class BASEDataModule(pl.LightningDataModule):
             "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
         dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
         dataloader_options["shuffle"] = False
+        num_workers = int(dataloader_options["num_workers"])
         return DataLoader(
             self.test_dataset,
-            persistent_workers=True,
+            persistent_workers=(num_workers > 0),
             **dataloader_options,
         )

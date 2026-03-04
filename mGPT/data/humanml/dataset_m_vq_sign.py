@@ -48,6 +48,8 @@ class H2SMotionDatasetVQ(data.Dataset):
         self.unit_length = unit_length
         self.max_motion_length = max_motion_length
         self.min_motion_length = min_motion_length
+        self.use_contact_labels = bool(kwargs.get("use_contact_labels", False))
+        self.contact_dir_name = str(kwargs.get("contact_dir_name", "contact_labels"))
         assert max_motion_length % unit_length == 0 and min_motion_length % unit_length == 0
 
         self.all_data = []
@@ -102,6 +104,58 @@ class H2SMotionDatasetVQ(data.Dataset):
             self.phoenix_len += len(self.ann)
 
         print(f'Data loading done. All: {len(self.all_data)}, How2Sign: {self.h2s_len}, CSL: {self.csl_len}, Phoenix: {self.phoenix_len}')
+        if self.use_contact_labels:
+            print(f'Contact labels enabled. Directory name: {self.contact_dir_name}')
+
+    def _contact_path(self, sample, resolved_src):
+        name = sample['name']
+        if resolved_src == 'how2sign':
+            split = sample.get('split', 'train')
+            return os.path.join(self.root_dir, split, self.contact_dir_name, f"{name}.pkl")
+        if resolved_src == 'csl':
+            return os.path.join(self.csl_root, self.contact_dir_name, f"{name}.pkl")
+        if resolved_src == 'phoenix':
+            return os.path.join(self.phoenix_root, self.contact_dir_name, f"{name}.pkl")
+        return None
+
+    def _load_contact_labels(self, sample, resolved_src):
+        if not self.use_contact_labels:
+            return None
+        path = self._contact_path(sample, resolved_src)
+        if path is None or (not os.path.isfile(path)):
+            return None
+        with open(path, 'rb') as f:
+            obj = pickle.load(f)
+        if isinstance(obj, dict):
+            if 'labels' in obj:
+                labels = obj['labels']
+            elif 'contact_labels' in obj:
+                labels = obj['contact_labels']
+            else:
+                labels = None
+                for v in obj.values():
+                    if isinstance(v, np.ndarray):
+                        labels = v
+                        break
+                if labels is None:
+                    return None
+        else:
+            labels = obj
+        labels = np.asarray(labels)
+        if labels.ndim != 2 or labels.shape[1] != 3:
+            return None
+        return labels.astype(np.float32)
+
+    def _resample_temporal(self, arr, target_len):
+        if arr is None:
+            return None
+        src_len = int(arr.shape[0])
+        if src_len == target_len:
+            return arr
+        if src_len <= 0 or target_len <= 0:
+            return np.zeros((max(target_len, 0), arr.shape[1]), dtype=arr.dtype)
+        idx = np.linspace(0, src_len - 1, num=target_len, dtype=int)
+        return arr[idx]
         
 
     def __len__(self):
@@ -130,18 +184,32 @@ class H2SMotionDatasetVQ(data.Dataset):
             clip_poses, text, name, _ = load_iso_sample(sample, self.phoenix_root, dataset='phoenix_iso')
             src = 'phoenix'
 
+        if clip_poses is None:
+            return None
+
+        contact_labels = self._load_contact_labels(sample, src)
+        if contact_labels is not None and contact_labels.shape[0] != clip_poses.shape[0]:
+            contact_labels = self._resample_temporal(contact_labels, clip_poses.shape[0])
+
         clip_poses = (clip_poses - self.mean.numpy())/(self.std.numpy()+1e-10)
         m_length = clip_poses.shape[0]
         if m_length < self.min_motion_length:
             idx = np.linspace(0, m_length-1, num=self.min_motion_length, dtype=int)
             clip_poses = clip_poses[idx]
+            if contact_labels is not None:
+                contact_labels = contact_labels[idx]
         elif m_length > self.max_motion_length:
             idx = np.linspace(0, m_length-1, num=self.max_motion_length, dtype=int)
             clip_poses = clip_poses[idx]
+            if contact_labels is not None:
+                contact_labels = contact_labels[idx]
         else:
             m_length = (m_length // self.unit_length) * self.unit_length
             idx = (clip_poses.shape[0] - m_length) // 2
             clip_poses = clip_poses[idx:idx + m_length]
+            if contact_labels is not None:
+                contact_labels = contact_labels[idx:idx + m_length]
         m_length = clip_poses.shape[0]
+        contact_tensor = None if contact_labels is None else torch.from_numpy(contact_labels).float()
 
-        return text, torch.from_numpy(clip_poses).float(), m_length, name, None, None, None, None, None, src  #see definitions in utils.py
+        return text, torch.from_numpy(clip_poses).float(), m_length, name, contact_tensor, None, None, None, None, src  #see definitions in utils.py

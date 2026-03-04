@@ -38,6 +38,37 @@ class SmoothL1LossWithMask(nn.Module):
         return F.smooth_l1_loss(pred, target)
 
 
+class BCEWithLogitsLossWithMask(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def forward(self, pred, target, length=None, sample_valid=None):
+        target = target.to(dtype=pred.dtype)
+        loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+        if length is not None:
+            mask = create_mask(length, pred.device)
+            if mask.shape[1] != loss.shape[1]:
+                if mask.shape[1] > loss.shape[1]:
+                    mask = mask[:, :loss.shape[1]]
+                else:
+                    pad = torch.zeros(
+                        (mask.shape[0], loss.shape[1] - mask.shape[1], 1),
+                        device=mask.device,
+                        dtype=mask.dtype,
+                    )
+                    mask = torch.cat([mask, pad], dim=1)
+            while mask.dim() < loss.dim():
+                mask = mask.unsqueeze(-1)
+        else:
+            mask = torch.ones_like(loss[..., :1], device=pred.device, dtype=pred.dtype)
+        if sample_valid is not None:
+            sv = sample_valid.to(device=pred.device, dtype=pred.dtype).view(-1, 1, 1)
+            mask = mask * sv
+        loss = loss * mask
+        denom = (mask.sum() * loss.shape[-1]).clamp_min(1.0)
+        return loss.sum() / denom
+
+
 class GPTLosses(BaseLosses):
     
     def __init__(self, cfg, stage, num_joints, **kwargs):
@@ -66,6 +97,9 @@ class GPTLosses(BaseLosses):
             losses.append("recons_accel_wrist_rel")
             params['recons_accel_wrist_rel'] = float(cfg.LOSS.get("LAMBDA_ACCEL_WRIST_REL", 0.0))
 
+            losses.append("recons_contact")
+            params['recons_contact'] = float(cfg.LOSS.get("LAMBDA_CONTACT", 0.0))
+
             losses.append("vq_commit")
             params['vq_commit'] = cfg.LOSS.LAMBDA_COMMIT
         elif stage in ["lm_pretrain", "lm_instruct"]:
@@ -79,7 +113,9 @@ class GPTLosses(BaseLosses):
         # Define loss functions & weights
         losses_func = {}
         for loss in losses:
-            if loss.split('_')[0] == 'recons':
+            if loss == "recons_contact":
+                losses_func[loss] = BCEWithLogitsLossWithMask
+            elif loss.split('_')[0] == 'recons':
                 if recons_loss == "l1":
                     losses_func[loss] = nn.L1Loss
                 elif recons_loss == "l2":
@@ -210,6 +246,18 @@ class GPTLosses(BaseLosses):
                     rel_acc_lengths = [max(int(x) - 2, 0) for x in rs_set['length']]
                     if max(rel_acc_lengths) > 0:
                         total += self._update_loss("recons_accel_wrist_rel", rel_acc_rst, rel_acc_ref, rel_acc_lengths)
+            if self._params['recons_contact'] != 0.0:
+                pred_contact = rs_set.get('contact_logits', None)
+                gt_contact = rs_set.get('gt_contact_labels', None)
+                gt_contact_has_label = rs_set.get('gt_contact_has_label', None)
+                if pred_contact is not None and gt_contact is not None:
+                    total += self._update_loss(
+                        "recons_contact",
+                        pred_contact,
+                        gt_contact,
+                        rs_set['length'],
+                        sample_valid=gt_contact_has_label,
+                    )
             total += self._update_loss("vq_commit", rs_set['loss_commit'],
                                        rs_set['loss_commit'])
 

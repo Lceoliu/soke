@@ -1,8 +1,8 @@
 target: mGPT.archs.mgpt_vq.VQVae
 params:
   quantizer: 'lfq'
-  num_quantizers: 4
-  code_num: 128
+  num_quantizers: 5
+  code_num: 256
   code_dim: 512
   use_contact: true
   num_contact_classes: 3
@@ -19,5 +19,5 @@ params:
   dilation_growth_rate: 3
   norm: None
   activation: 'relu'
-  nfeats: 43
+  nfeats: 45
   ablation: ${ABLATION}

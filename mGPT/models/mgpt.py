@@ -91,11 +91,13 @@ class MotionGPT(BaseModel):
         self.lambda_fk_hand = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
         self.lambda_accel_hand = float(cfg.LOSS.get("LAMBDA_ACCEL_HAND", 0.0))
         self.lambda_accel_wrist_rel = float(cfg.LOSS.get("LAMBDA_ACCEL_WRIST_REL", 0.0))
+        self.lambda_contact = float(cfg.LOSS.get("LAMBDA_CONTACT", 0.0))
         self._use_hand_fk_supervision = (
             self.lambda_fk_hand > 0.0
             or self.lambda_accel_hand > 0.0
             or self.lambda_accel_wrist_rel > 0.0
         )
+        self._use_contact_supervision = self.lambda_contact > 0.0
         self.register_buffer(
             "_smplx_shape_template",
             torch.tensor(
@@ -251,6 +253,31 @@ class MotionGPT(BaseModel):
                 continue
             if hasattr(quantizer, "set_anneal_progress"):
                 quantizer.set_anneal_progress(progress)
+
+    @staticmethod
+    def _resize_contact_logits(logits: torch.Tensor, target_t: int) -> torch.Tensor:
+        if logits is None or logits.shape[-1] == target_t:
+            return logits
+        return F.interpolate(logits, size=target_t, mode='linear', align_corners=False)
+
+    def _merge_contact_logits(self, aux_list, target_t: int):
+        logits_list = []
+        for aux in aux_list:
+            if not isinstance(aux, dict):
+                continue
+            logits = aux.get("contact_logits", None)
+            if logits is None:
+                continue
+            logits = self._resize_contact_logits(logits, target_t)
+            logits_list.append(logits)
+        if len(logits_list) == 0:
+            return None
+        if len(logits_list) == 1:
+            merged = logits_list[0]
+        else:
+            merged = torch.stack(logits_list, dim=0).mean(dim=0)
+        # [B, C=3, T] -> [B, T, C]
+        return merged.permute(0, 2, 1).contiguous()
 
     def on_train_epoch_start(self):
         if str(self.hparams.stage) != "vae":
@@ -510,39 +537,59 @@ class MotionGPT(BaseModel):
         feats_rst_hand = feats_rst_re = loss_commit_hand = loss_commit_re = perplexity_re = perplexity_hand = None
         fk_lhand_rst = fk_rhand_rst = fk_lhand_ref = fk_rhand_ref = None
         wrist_l_rst = wrist_r_rst = wrist_l_ref = wrist_r_ref = None
+        gt_contact_labels = batch.get("gt_contact_labels", None)
+        gt_contact_has_label = batch.get("gt_contact_has_label", None)
+        need_contact_aux = self._use_contact_supervision and (gt_contact_labels is not None)
+        contact_aux_list = []
+        contact_logits = None
+
+        def _vae_forward(module, x):
+            if need_contact_aux:
+                x_rst, x_commit, x_perplex, x_aux = module(x, return_aux=True)
+                return x_rst, x_commit, x_perplex, x_aux
+            x_rst, x_commit, x_perplex = module(x)
+            return x_rst, x_commit, x_perplex, None
+
         # motion encode & decode
         if self.hand_vae_cfg is None:
-            feats_rst, loss_commit, perplexity = self.vae(feats_ref)
+            feats_rst, loss_commit, perplexity, aux = _vae_forward(self.vae, feats_ref)
+            contact_aux_list.append(aux)
         elif self.rhand_vae_cfg is None:
             feats_ref_hand = feats_ref[..., 30:120]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-            feats_rst_hand, loss_commit_hand, perplexity_hand = self.hand_vae(feats_ref_hand)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_hand, loss_commit_hand, perplexity_hand, aux_hand = _vae_forward(self.hand_vae, feats_ref_hand)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_hand, feats_rst_re[..., 30:]], dim=-1)
             loss_commit = loss_commit_hand + loss_commit_re
             perplexity = perplexity_hand + perplexity_re
+            contact_aux_list.extend([aux_hand, aux_re])
         elif self.face_vae_cfg is None:
             feats_ref_lhand = feats_ref[..., 30:75]
             feats_ref_rhand = feats_ref[..., 75:120]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-            feats_rst_lhand, loss_commit_lhand, perplexity_lhand = self.hand_vae(feats_ref_lhand)
-            feats_rst_rhand, loss_commit_rhand, perplexity_rhand = self.rhand_vae(feats_ref_rhand)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_lhand, loss_commit_lhand, perplexity_lhand, aux_lhand = _vae_forward(self.hand_vae, feats_ref_lhand)
+            feats_rst_rhand, loss_commit_rhand, perplexity_rhand, aux_rhand = _vae_forward(self.rhand_vae, feats_ref_rhand)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_lhand, feats_rst_rhand, feats_rst_re[..., 30:]], dim=-1)
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re
+            contact_aux_list.extend([aux_lhand, aux_rhand, aux_re])
         else:
             feats_ref_lhand = feats_ref[..., 30:75]
             feats_ref_rhand = feats_ref[..., 75:120]
             feats_ref_face = feats_ref[..., 123:]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:123]], dim=-1)
-            feats_rst_lhand, loss_commit_lhand, perplexity_lhand = self.hand_vae(feats_ref_lhand)
-            feats_rst_rhand, loss_commit_rhand, perplexity_rhand = self.rhand_vae(feats_ref_rhand)
-            feats_rst_face, loss_commit_face, perplexity_face = self.face_vae(feats_ref_face)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_lhand, loss_commit_lhand, perplexity_lhand, aux_lhand = _vae_forward(self.hand_vae, feats_ref_lhand)
+            feats_rst_rhand, loss_commit_rhand, perplexity_rhand, aux_rhand = _vae_forward(self.rhand_vae, feats_ref_rhand)
+            feats_rst_face, loss_commit_face, perplexity_face, aux_face = _vae_forward(self.face_vae, feats_ref_face)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_lhand, feats_rst_rhand, feats_rst_re[..., 30:], feats_rst_face], dim=-1)
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re + loss_commit_face
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re + perplexity_face
+            contact_aux_list.extend([aux_lhand, aux_rhand, aux_face, aux_re])
+
+        if need_contact_aux:
+            contact_logits = self._merge_contact_logits(contact_aux_list, target_t=feats_ref.shape[1])
 
         if self._use_hand_fk_supervision and feats_ref.shape[-1] == 133:
             # Compute FK joints in one batched SMPL-X pass for both prediction/reference
@@ -581,6 +628,9 @@ class MotionGPT(BaseModel):
             "wrist_r_rst": wrist_r_rst,
             "wrist_l_ref": wrist_l_ref,
             "wrist_r_ref": wrist_r_ref,
+            "contact_logits": contact_logits,
+            "gt_contact_labels": gt_contact_labels,
+            "gt_contact_has_label": gt_contact_has_label,
         }
         return rs_set
 

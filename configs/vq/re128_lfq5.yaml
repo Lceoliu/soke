@@ -1,7 +1,7 @@
 target: mGPT.archs.mgpt_vq.VQVae
 params:
   quantizer: 'lfq'
-  num_quantizers: 4
+  num_quantizers: 5
   code_num: 128
   code_dim: 512
   use_contact: true

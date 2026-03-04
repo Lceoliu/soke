@@ -1,4 +1,4 @@
-NAME: VAE_SIGN_FINETUNE_LFQ4_ACC
+NAME: VAE_SIGN_SCRATCH_LFQ5_ALLPARTS
 ACCELERATOR: 'gpu'
 PRECISION: '16-mixed'
 NUM_NODES: 1
@@ -7,16 +7,18 @@ DEVICE: [0,1,2,3,4,5,6,7]
 TRAIN:
   STAGE: vae
   NUM_WORKERS: 16
-  # Per-GPU batch size. FK adds extra SMPL-X forward cost, so keep conservative.
-  BATCH_SIZE: 16
-  END_EPOCH: 120
+  # Per-GPU batch size. LFQ5 is heavier than LFQ4; start conservatively.
+  BATCH_SIZE: 8
+  END_EPOCH: 160
   NUM_SANITY_VAL_STEPS: 0
   DDP_FIND_UNUSED_PARAMETERS: false
   RESUME: ''
   PRETRAINED: ''
   PRETRAINED_VAE: ''
-  PRETRAINED_VAE_BODY: '/home/SOKE/experiments/mgpt/VAE_MOTIONX_PRETRAIN_LFQ4_C128H256/checkpoints/last.ckpt'
-  PRETRAINED_VAE_LOAD_BODY: true
+  PRETRAINED_VAE_BODY: ''
+  PRETRAINED_VAE_HAND: ''
+  PRETRAINED_VAE_RHAND: ''
+  PRETRAINED_VAE_LOAD_BODY: false
   PRETRAINED_VAE_LOAD_HAND: false
   PRETRAINED_VAE_LOAD_RHAND: false
 
@@ -72,11 +74,8 @@ LOSS:
   LAMBDA_FEATURE: 1.0
   LAMBDA_VELOCITY: 0.3
   LAMBDA_FK_HAND: 0.5
-  # Hand joint acceleration in wrist-relative FK space (2nd-order temporal diff).
   LAMBDA_ACCEL_HAND: 0.1
-  # Two-hand relation acceleration on global wrist relative vector (right-left).
   LAMBDA_ACCEL_WRIST_REL: 0.1
-  # BCE loss on per-frame contact labels [lhand_rhand, lhand_face, rhand_face].
   LAMBDA_CONTACT: 0.05
   VELOCITY_PART_WEIGHTS:
     UPPER: 1.0
@@ -97,14 +96,14 @@ model:
     condition: 'text'
     task: 't2m'
     lm: ${lm.default}
-    motion_vae: ${vq.re128_lfq4}
-    hand_vae_cfg: ${vq.hand256_lfq4}
-    rhand_vae_cfg: ${vq.hand256_lfq4}
+    motion_vae: ${vq.re128_lfq5}
+    hand_vae_cfg: ${vq.hand256_lfq5}
+    rhand_vae_cfg: ${vq.hand256_lfq5}
 
 LOGGER:
   TYPE: ['wandb']
   VAL_EVERY_STEPS: 10
   WANDB:
     params:
-      project: SLG_VAE_FINETUNE
+      project: SLG_VAE_SCRATCH
       offline: true
