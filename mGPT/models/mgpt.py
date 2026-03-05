@@ -58,14 +58,27 @@ class MotionGPT(BaseModel):
         if self.face_vae_cfg is not None:
             self.face_vae = instantiate_from_config(self.face_vae_cfg)
 
+        self.lm_body_num_quantizers = int(getattr(self.vae, "num_quantizers", 1))
+        self.lm_hand_num_quantizers = int(
+            getattr(getattr(self, "hand_vae", None), "num_quantizers", self.lm_body_num_quantizers)
+        )
+        self.lm_rhand_num_quantizers = int(
+            getattr(getattr(self, "rhand_vae", None), "num_quantizers", self.lm_body_num_quantizers)
+        )
+        q_candidates = [self.lm_body_num_quantizers]
+        self.lm_num_token_parts = 1
+        if self.hand_vae_cfg is not None:
+            q_candidates.append(self.lm_hand_num_quantizers)
+            self.lm_num_token_parts += 1
+        if self.rhand_vae_cfg is not None:
+            q_candidates.append(self.lm_rhand_num_quantizers)
+            self.lm_num_token_parts += 1
+        # For multi-head LM text formatting, all parts must share one temporal token length.
+        # We use the minimum quantizer level count to avoid invalid shape coupling when parts differ.
+        self.lm_shared_num_quantizers = int(min(q_candidates))
+
         # Freeze the motion tokenizer for lm training
         if 'lm' in self.hparams.stage:
-            if getattr(self.vae, "num_quantizers", 1) > 1:
-                raise NotImplementedError(
-                    "Multi-level quantizer tokens are not yet wired into LM training/inference. "
-                    "Use STAGE=vae for multi-level tokenizer training, or switch to single-level "
-                    "quantization for LM stages."
-                )
             self.vae.training = False
             for p in self.vae.parameters():
                 p.requires_grad = False
@@ -235,6 +248,7 @@ class MotionGPT(BaseModel):
         lengths = batch["length"]
         tasks = batch["tasks"]
         all_captions = batch['all_captions']
+        tokens_ref, lengths = self._flatten_batch_tokens_for_lm(tokens_ref, lengths)
         if self.hparams.condition == 'caption':
             texts = [random.choice(all_captions[i]) for i in range(len(texts))]
 
@@ -278,6 +292,62 @@ class MotionGPT(BaseModel):
             merged = torch.stack(logits_list, dim=0).mean(dim=0)
         # [B, C=3, T] -> [B, T, C]
         return merged.permute(0, 2, 1).contiguous()
+
+    def _flatten_batch_tokens_for_lm(self, tokens: torch.Tensor, lengths):
+        if tokens is None:
+            return tokens, lengths
+        if not torch.is_tensor(tokens):
+            return tokens, lengths
+
+        # [B, T, Q, 3] -> [B, T*Q, 3]
+        if tokens.dim() == 4:
+            q_use = min(int(tokens.shape[2]), int(self.lm_shared_num_quantizers))
+            if q_use > 0 and int(tokens.shape[2]) != q_use:
+                tokens = tokens[:, :, :q_use, :]
+            bsz, tlen, _, pnum = tokens.shape
+            tokens = tokens.reshape(bsz, tlen * q_use, pnum)
+            lengths = [int(l) * q_use for l in lengths]
+            return tokens, lengths
+
+        # [B, T, Q] (single stream multi-level) -> [B, T*Q]
+        if tokens.dim() == 3:
+            is_multihead_flat = (
+                int(self.lm_num_token_parts) > 1
+                and int(tokens.shape[-1]) == int(self.lm_num_token_parts)
+            )
+            if is_multihead_flat:
+                return tokens, lengths
+            q_use = min(int(tokens.shape[-1]), int(self.lm_body_num_quantizers))
+            if q_use > 0 and int(tokens.shape[-1]) != q_use:
+                tokens = tokens[:, :, :q_use]
+            bsz, tlen, _ = tokens.shape
+            tokens = tokens.reshape(bsz, tlen * q_use)
+            lengths = [int(l) * q_use for l in lengths]
+            return tokens, lengths
+
+        return tokens, lengths
+
+    @staticmethod
+    def _flatten_single_tokens_for_lm(tokens: torch.Tensor, q_use: int):
+        if tokens.dim() == 1:
+            return tokens, int(tokens.shape[0])
+        if tokens.dim() == 2:
+            q_keep = min(int(tokens.shape[-1]), int(max(q_use, 1)))
+            tokens = tokens[:, :q_keep].reshape(-1)
+            return tokens, int(tokens.shape[0])
+        return tokens.reshape(-1), int(tokens.numel())
+
+    @staticmethod
+    def _unflatten_single_tokens_from_lm(tokens: torch.Tensor, q_use: int):
+        if tokens.dim() != 1:
+            tokens = tokens.reshape(-1)
+        q_use = int(max(q_use, 1))
+        if q_use == 1:
+            return tokens
+        valid = (int(tokens.shape[0]) // q_use) * q_use
+        if valid <= 0:
+            return tokens[:1]
+        return tokens[:valid].view(-1, q_use)
 
     def on_train_epoch_start(self):
         if str(self.hparams.stage) != "vae":
@@ -331,6 +401,21 @@ class MotionGPT(BaseModel):
         outputs_tokens = gen_results['outputs_tokens']
         outputs_tokens_hand = gen_results['outputs_tokens_hand']
         outputs_tokens_rhand = gen_results['outputs_tokens_rhand']
+
+        q_body_use = self.lm_body_num_quantizers
+        q_hand_use = self.lm_hand_num_quantizers
+        q_rhand_use = self.lm_rhand_num_quantizers
+        if outputs_tokens_hand is not None or outputs_tokens_rhand is not None:
+            q_body_use = q_hand_use = q_rhand_use = self.lm_shared_num_quantizers
+
+        for i in range(len(outputs_tokens)):
+            outputs_tokens[i] = self._unflatten_single_tokens_from_lm(outputs_tokens[i], q_body_use)
+        if outputs_tokens_hand is not None:
+            for i in range(len(outputs_tokens_hand)):
+                outputs_tokens_hand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_hand[i], q_hand_use)
+        if outputs_tokens_rhand is not None:
+            for i in range(len(outputs_tokens_rhand)):
+                outputs_tokens_rhand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_rhand[i], q_rhand_use)
 
         max_len = max(map(len, outputs_tokens))
         if outputs_tokens_hand is not None:
@@ -443,16 +528,25 @@ class MotionGPT(BaseModel):
         for i in range(len(feats_ref)):
             if self.hand_vae_cfg is None:
                 motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
-                motion_tokens.append(motion_token[0])
-                lengths_tokens.append(motion_token.shape[1])
+                flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                    motion_token[0], self.lm_body_num_quantizers
+                )
+                motion_tokens.append(flat_motion)
+                lengths_tokens.append(len_motion)
 
             else:
                 motion_token, _ = self.vae.encode(feats_ref_re[i:i+1])
-                motion_tokens.append(motion_token[0])
-                lengths_tokens.append(motion_token.shape[1])
-
                 hand_token, _ = self.hand_vae.encode(feats_ref_hand[i:i+1])
-                hand_tokens.append(hand_token[0])
+                flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                    motion_token[0], self.lm_shared_num_quantizers
+                )
+                flat_hand, len_hand = self._flatten_single_tokens_for_lm(
+                    hand_token[0], self.lm_shared_num_quantizers
+                )
+                shared_len = min(len_motion, len_hand)
+                motion_tokens.append(flat_motion[:shared_len])
+                hand_tokens.append(flat_hand[:shared_len])
+                lengths_tokens.append(shared_len)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
@@ -482,11 +576,15 @@ class MotionGPT(BaseModel):
         lengths_tokens = []
         for i in range(len(feats_ref)):
             motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
-            motion_tokens.append(motion_token[0])
+            flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                motion_token[0], self.lm_body_num_quantizers
+            )
+            motion_tokens.append(flat_motion)
+            lengths_tokens.append(len_motion)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
-                                               lengths=lengths,
+                                               lengths=lengths_tokens,
                                                task=task,
                                                stage='test')
 
@@ -499,6 +597,9 @@ class MotionGPT(BaseModel):
                                      0,
                                      self.hparams.codebook_size - 1,
                                      out=None)
+            outputs[i] = self._unflatten_single_tokens_from_lm(
+                outputs[i], self.lm_body_num_quantizers
+            )
 
             if len(outputs[i]) > 1:
                 motion = self.vae.decode(outputs[i])

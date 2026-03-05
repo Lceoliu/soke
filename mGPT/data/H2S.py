@@ -75,6 +75,22 @@ class H2SDataModule(BASEDataModule):
         self.hparams.stage = cfg.TRAIN.STAGE
         self.hparams.w_vectorizer = WordVectorizer(
             cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
+        self.hparams.lm_token_num_quantizers = 1
+        self.hparams.lm_token_num_parts = 1
+
+        def _extract_num_quantizers(module_cfg, default_q=1):
+            if module_cfg is None:
+                return int(default_q)
+            try:
+                params = module_cfg.get("params", None)
+            except Exception:
+                params = None
+            if params is None:
+                return int(default_q)
+            try:
+                return int(params.get("num_quantizers", default_q))
+            except Exception:
+                return int(default_q)
 
         # Dataset switch
         self.DatasetEval = H2SMotionDatasetVQ if cfg.TRAIN.STAGE in ["vae"] else Text2MotionDatasetEval
@@ -89,6 +105,21 @@ class H2SDataModule(BASEDataModule):
             self.hparams.code_path = cfg.DATASET.CODE_PATH
             self.hparams.task_path = cfg.DATASET.TASK_PATH
             self.hparams.std_text = cfg.DATASET.H2S.STD_TEXT
+
+            # LM token files may already be flattened from [T, Q, P] to [T*Q, P].
+            # We pass shared Q and active part count so dataset length clipping stays correct.
+            model_params = cfg.model.params
+            body_q = _extract_num_quantizers(model_params.get("motion_vae", None), default_q=1)
+            q_list = [body_q]
+            num_parts = 1
+            if model_params.get("hand_vae_cfg", None) is not None:
+                q_list.append(_extract_num_quantizers(model_params.get("hand_vae_cfg"), default_q=body_q))
+                num_parts += 1
+            if model_params.get("rhand_vae_cfg", None) is not None:
+                q_list.append(_extract_num_quantizers(model_params.get("rhand_vae_cfg"), default_q=body_q))
+                num_parts += 1
+            self.hparams.lm_token_num_quantizers = int(min(q_list))
+            self.hparams.lm_token_num_parts = int(num_parts)
             self.Dataset = Text2MotionDatasetCB
         elif cfg.TRAIN.STAGE == "token":
             self.Dataset = Text2MotionDatasetToken

@@ -9,6 +9,22 @@ from mGPT.data.build_data import build_data
 from mGPT.models.build_model import build_model
 from mGPT.utils.load_checkpoint import load_pretrained_vae
 
+
+def flatten_token_levels(token_tensor, q_keep=None):
+    # token_tensor: [B,T] or [B,T,Q]
+    if token_tensor.dim() == 3:
+        q = token_tensor.shape[-1]
+        if q_keep is not None:
+            q = min(int(q_keep), int(token_tensor.shape[-1]))
+            token_tensor = token_tensor[..., :q]
+        token_tensor = token_tensor.reshape(token_tensor.shape[0], -1)
+        return token_tensor, int(q)
+    if token_tensor.dim() == 2:
+        return token_tensor, 1
+    token_tensor = token_tensor.reshape(token_tensor.shape[0], -1)
+    return token_tensor, 1
+
+
 def main():
     # parse options
     cfg = parse_args(phase="test")  # parse config file
@@ -66,7 +82,22 @@ def main():
             target_re, _ = model.vae.encode(pose_re)
             target_lhand, _ = model.hand_vae.encode(pose_lhand)
             target_rhand, _ = model.rhand_vae.encode(pose_rhand)
-            target = np.stack([target_re.to('cpu').numpy(), target_lhand.to('cpu').numpy(), target_rhand.to('cpu').numpy()], axis=-1)
+            q_re = target_re.shape[-1] if target_re.dim() == 3 else 1
+            q_lhand = target_lhand.shape[-1] if target_lhand.dim() == 3 else 1
+            q_rhand = target_rhand.shape[-1] if target_rhand.dim() == 3 else 1
+            q_shared = min(q_re, q_lhand, q_rhand)
+            target_re, _ = flatten_token_levels(target_re, q_keep=q_shared)
+            target_lhand, _ = flatten_token_levels(target_lhand, q_keep=q_shared)
+            target_rhand, _ = flatten_token_levels(target_rhand, q_keep=q_shared)
+            min_len = min(target_re.shape[1], target_lhand.shape[1], target_rhand.shape[1])
+            target = np.stack(
+                [
+                    target_re[:, :min_len].to('cpu').numpy(),
+                    target_lhand[:, :min_len].to('cpu').numpy(),
+                    target_rhand[:, :min_len].to('cpu').numpy(),
+                ],
+                axis=-1,
+            )
             # save_data[name[0]] = {'body': target_re.to('cpu').numpy()[0].tolist(), 
             #                       'lhand': target_lhand.to('cpu').numpy()[0].tolist(), 
             #                       'rhand': target_rhand.to('cpu').numpy()[0].tolist()}
@@ -77,10 +108,17 @@ def main():
                 pose_re = torch.cat([pose[..., :30], pose[..., 120:]], dim=-1)
                 target_hand, _ = model.hand_vae.encode(pose_hand)
                 target_re, _ = model.vae.encode(pose_re)
-                target = np.stack([target_re.to('cpu').numpy(), target_hand.to('cpu').numpy()], axis=-1)
+                q_re = target_re.shape[-1] if target_re.dim() == 3 else 1
+                q_hand = target_hand.shape[-1] if target_hand.dim() == 3 else 1
+                q_shared = min(q_re, q_hand)
+                target_re, _ = flatten_token_levels(target_re, q_keep=q_shared)
+                target_hand, _ = flatten_token_levels(target_hand, q_keep=q_shared)
+                min_len = min(target_re.shape[1], target_hand.shape[1])
+                target = np.stack([target_re[:, :min_len].to('cpu').numpy(), target_hand[:, :min_len].to('cpu').numpy()], axis=-1)
                 print(target.shape)
             else:
                 target, _ = model.vae.encode(pose)
+                target, _ = flatten_token_levels(target)
                 target = target.to('cpu').numpy()
 
         np.save(target_path, target)
