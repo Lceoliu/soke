@@ -35,6 +35,63 @@ def _extract_module_state(state_dict, prefixes):
     return OrderedDict(), None
 
 
+def _remap_legacy_decoder_keys(module, module_dict):
+    """
+    Backward compatibility for old VAE checkpoints.
+
+    Old decoder keys:
+      decoder.model.<idx>...
+    New decoder keys:
+      decoder.input_proj...
+      decoder.upsample_blocks.<i>...
+      decoder.pre_out...
+      decoder.out_proj...
+    """
+    if not any(k.startswith("decoder.model.") for k in module_dict.keys()):
+        return module_dict
+    if (not hasattr(module, "decoder")) or (not hasattr(module.decoder, "upsample_blocks")):
+        return module_dict
+
+    n_blocks = len(module.decoder.upsample_blocks)
+    target_state = module.state_dict()
+
+    # Keep non-legacy keys first.
+    remapped = OrderedDict(
+        (k, v) for k, v in module_dict.items() if not k.startswith("decoder.model.")
+    )
+
+    for key, value in module_dict.items():
+        if not key.startswith("decoder.model."):
+            continue
+        parts = key.split(".")
+        if len(parts) < 4:
+            continue
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            continue
+        suffix = ".".join(parts[3:])
+        new_key = None
+        if idx == 0:
+            new_key = f"decoder.input_proj.{suffix}"
+        elif 2 <= idx < 2 + n_blocks:
+            new_key = f"decoder.upsample_blocks.{idx - 2}.{suffix}"
+        elif idx == 2 + n_blocks:
+            new_key = f"decoder.pre_out.{suffix}"
+        elif idx == 4 + n_blocks:
+            new_key = f"decoder.out_proj.{suffix}"
+
+        if new_key is None:
+            continue
+        if new_key not in target_state:
+            continue
+        if target_state[new_key].shape != value.shape:
+            continue
+        remapped.setdefault(new_key, value)
+
+    return remapped
+
+
 def load_pretrained_vae(cfg, model, logger=None):
     train_cfg = cfg.TRAIN
     default_path = str(train_cfg.get("PRETRAINED_VAE", "") or "")
@@ -85,10 +142,18 @@ def load_pretrained_vae(cfg, model, logger=None):
                 f"Failed to load {module_name} from {path}: no keys found for prefixes {prefixes}"
             )
 
+        module = getattr(model, module_attr)
+        legacy_count = sum(1 for k in module_dict.keys() if k.startswith("decoder.model."))
+        module_dict = _remap_legacy_decoder_keys(module, module_dict)
         if logger is not None:
             logger.info(f"Loading {module_name} from {path} (prefix={prefix_used})")
+            if legacy_count > 0:
+                logger.info(
+                    f"{module_name}: detected legacy decoder keys ({legacy_count}), "
+                    f"applied compatibility remap to new decoder layout."
+                )
 
-        neq_load_customized(getattr(model, module_attr), module_dict, verbose=True)
+        neq_load_customized(module, module_dict, verbose=True)
 
     maybe_load_module("body_vae", "vae", load_body, body_path, ["motion_vae.", "vae."])
     maybe_load_module("hand_vae", "hand_vae", load_hand, hand_path, ["hand_vae."])

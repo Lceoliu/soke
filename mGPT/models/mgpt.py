@@ -957,6 +957,18 @@ class MotionGPT(BaseModel):
             elif "lm" in self.hparams.stage:
                 # return rs_set["joints_rst"], rs_set["joints_ref"], rs_set["vertices_rst"], rs_set["vertices_ref"], rs_set["m_ref"], rs_set["m_rst"], \
                 # rs_set_m2t["t_pred"], rs_set_m2t["t_ref"], batch["length"]
+                if self.hparams.task == "m2t":
+                    # `test_step` expects motion-like tensors for optional dumping.
+                    # For m2t evaluation, generated text is already consumed by metrics,
+                    # so we return references as placeholders to keep the interface stable.
+                    return {
+                        'name': name,
+                        'feats_ref': rs_set_m2t["m_ref"],
+                        'feats_rst': rs_set_m2t["m_ref"],
+                        'lengths': batch['length'],
+                        'lengths_rst': batch['length'],
+                        'text': batch_text,
+                    }
                 return {'name': name, 'feats_ref': rs_set["m_ref"], 'feats_rst': rs_set['m_rst'], 'lengths': batch['length'], 'lengths_rst': rs_set['lengths_rst'], 'text': batch_text}
                
         return loss

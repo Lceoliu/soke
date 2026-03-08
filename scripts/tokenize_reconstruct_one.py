@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,7 +81,21 @@ def collect_pose_files(pose_dir: str):
     files = [f for f in os.listdir(pose_dir) if f.endswith((".pt", ".pkl"))]
     if not files:
         raise FileNotFoundError(f"No '*.pt' or '*.pkl' files found in {pose_dir}")
-    files = sorted(files, key=lambda x: int(re.search(r"(\d+)", x).group(1)))
+
+    def frame_id(name: str) -> int:
+        # Prefer explicit how2sign frame suffix: *_<frame>_3D.pkl
+        m = re.search(r"_(\d+)_3D\.(?:pkl|pt)$", name)
+        if m:
+            return int(m.group(1))
+        # Common CSL style: 000123.pkl
+        m = re.search(r"(\d+)\.(?:pkl|pt)$", name)
+        if m:
+            return int(m.group(1))
+        # Fallback to last numeric group if naming is unconventional.
+        nums = re.findall(r"\d+", name)
+        return int(nums[-1]) if nums else 10**9
+
+    files = sorted(files, key=lambda x: (frame_id(x), x))
     return [os.path.join(pose_dir, f) for f in files]
 
 
@@ -126,6 +141,89 @@ def extract_module_state(state_dict, prefix):
     return out
 
 
+def remap_legacy_decoder_keys(module, module_state):
+    """
+    Backward compatibility:
+    old checkpoints used decoder.model.<idx>.* (single Sequential),
+    while current decoder uses named modules:
+      input_proj / upsample_blocks / pre_out / out_proj.
+    """
+    if not any(k.startswith("decoder.model.") for k in module_state.keys()):
+        return module_state
+    if not hasattr(module, "decoder") or not hasattr(module.decoder, "upsample_blocks"):
+        return module_state
+
+    n_blocks = len(module.decoder.upsample_blocks)
+    # Start from non-legacy keys, then append converted decoder keys.
+    remapped = OrderedDict(
+        (k, v) for k, v in module_state.items() if not k.startswith("decoder.model.")
+    )
+    target_state = module.state_dict()
+
+    for key, value in module_state.items():
+        if not key.startswith("decoder.model."):
+            continue
+        parts = key.split(".")
+        if len(parts) < 4:
+            continue
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            continue
+        suffix = ".".join(parts[3:])
+        new_key = None
+        if idx == 0:
+            new_key = f"decoder.input_proj.{suffix}"
+        elif 2 <= idx < 2 + n_blocks:
+            new_key = f"decoder.upsample_blocks.{idx - 2}.{suffix}"
+        elif idx == 2 + n_blocks:
+            new_key = f"decoder.pre_out.{suffix}"
+        elif idx == 4 + n_blocks:
+            new_key = f"decoder.out_proj.{suffix}"
+
+        if new_key is None or new_key not in target_state:
+            continue
+        if target_state[new_key].shape != value.shape:
+            continue
+        # Only fill if the new-format key is absent in source ckpt.
+        remapped.setdefault(new_key, value)
+
+    return remapped
+
+
+def load_module_with_compat(module, module_state, module_name):
+    if not module_state:
+        raise RuntimeError(f"Empty state_dict for {module_name}.")
+
+    module_state = remap_legacy_decoder_keys(module, module_state)
+    load_res = module.load_state_dict(module_state, strict=False)
+    missing = list(load_res.missing_keys)
+    unexpected = list(load_res.unexpected_keys)
+
+    # Ignore decoder activation placeholders that never have weights.
+    benign_missing_prefixes = (
+        "decoder.input_act",
+        "decoder.pre_out_act",
+        "contact_head.",
+    )
+    missing = [k for k in missing if not any(k.startswith(p) for p in benign_missing_prefixes)]
+    benign_unexpected_prefixes = (
+        "decoder.model.",
+        "contact_head.",
+    )
+    unexpected = [k for k in unexpected if not any(k.startswith(p) for p in benign_unexpected_prefixes)]
+
+    if missing or unexpected:
+        preview_m = ", ".join(missing[:8])
+        preview_u = ", ".join(unexpected[:8])
+        raise RuntimeError(
+            f"Failed to fully load {module_name}. "
+            f"missing={len(missing)} [{preview_m}] "
+            f"unexpected={len(unexpected)} [{preview_u}]. "
+            "This usually means cfg and ckpt architectures do not match."
+        )
+
+
 def build_tokenizers(cfg, ckpt_path, device):
     motion_cfg = OmegaConf.to_container(cfg.model.params.motion_vae, resolve=True)
     vae = instantiate_from_config(motion_cfg).to(device).eval()
@@ -141,14 +239,14 @@ def build_tokenizers(cfg, ckpt_path, device):
     vae_sd = extract_module_state(state_dict, "motion_vae.")
     if not vae_sd:
         vae_sd = extract_module_state(state_dict, "vae.")
-    vae.load_state_dict(vae_sd, strict=False)
+    load_module_with_compat(vae, vae_sd, "body_vae")
 
     if hand_vae is not None:
         hand_sd = extract_module_state(state_dict, "hand_vae.")
-        hand_vae.load_state_dict(hand_sd, strict=False)
+        load_module_with_compat(hand_vae, hand_sd, "hand_vae")
     if rhand_vae is not None:
         rhand_sd = extract_module_state(state_dict, "rhand_vae.")
-        rhand_vae.load_state_dict(rhand_sd, strict=False)
+        load_module_with_compat(rhand_vae, rhand_sd, "rhand_vae")
 
     return vae, hand_vae, rhand_vae
 
