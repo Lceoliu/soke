@@ -107,7 +107,6 @@ def main():
             # save_data[name[0]] = {'body': target_re.to('cpu').numpy()[0].tolist(), 
             #                       'lhand': target_lhand.to('cpu').numpy()[0].tolist(), 
             #                       'rhand': target_rhand.to('cpu').numpy()[0].tolist()}
-            print(target.shape)
         else:
             if hasattr(model, 'hand_vae'):
                 pose_hand = pose[..., 30:120]
@@ -121,7 +120,6 @@ def main():
                 target_hand, _ = flatten_token_levels(target_hand, q_keep=q_shared)
                 min_len = min(target_re.shape[1], target_hand.shape[1])
                 target = np.stack([target_re[:, :min_len].to('cpu').numpy(), target_hand[:, :min_len].to('cpu').numpy()], axis=-1)
-                print(target.shape)
             else:
                 target, _ = model.vae.encode(pose)
                 target, _ = flatten_token_levels(target)

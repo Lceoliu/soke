@@ -11,9 +11,9 @@ def load_pretrained(cfg, model, logger=None, phase="train"):
     
     if logger is not None:
         logger.info(f"Loading pretrain model from {ckpt_path}")
-        
-    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)["state_dict"]
-    model.load_state_dict(state_dict, strict=False)
+
+    state_dict = _read_state_dict(ckpt_path)
+    _load_state_dict_flexible(model, state_dict, logger=logger)
     return model
 
 
@@ -22,6 +22,69 @@ def _read_state_dict(ckpt_path):
     if isinstance(obj, dict) and "state_dict" in obj:
         return obj["state_dict"]
     return obj
+
+
+def _load_state_dict_flexible(model, pretrained_state, logger=None):
+    """
+    Load checkpoint with vocab-size compatibility.
+
+    If a parameter only mismatches in dim-0 (e.g., token embeddings / lm_head after
+    vocabulary growth), copy the overlapping prefix rows and keep the rest from the
+    current model initialization.
+    """
+    model_state = model.state_dict()
+    merged = OrderedDict(model_state)
+
+    loaded_exact = 0
+    loaded_partial = 0
+    skipped = []
+    partial_keys = []
+
+    for key, src_val in pretrained_state.items():
+        if key not in model_state:
+            skipped.append((key, "missing_in_model"))
+            continue
+
+        tgt_val = model_state[key]
+        if tuple(src_val.shape) == tuple(tgt_val.shape):
+            merged[key] = src_val
+            loaded_exact += 1
+            continue
+
+        # Vocab resize compatible load: only dim-0 differs, remaining dims match.
+        if (
+            src_val.ndim >= 1
+            and src_val.ndim == tgt_val.ndim
+            and tuple(src_val.shape[1:]) == tuple(tgt_val.shape[1:])
+        ):
+            overlap = min(int(src_val.shape[0]), int(tgt_val.shape[0]))
+            if overlap > 0:
+                patched = tgt_val.clone()
+                patched[:overlap] = src_val[:overlap].to(dtype=tgt_val.dtype)
+                merged[key] = patched
+                loaded_partial += 1
+                partial_keys.append((key, tuple(src_val.shape), tuple(tgt_val.shape), overlap))
+                continue
+
+        skipped.append((key, f"shape_mismatch ckpt={tuple(src_val.shape)} model={tuple(tgt_val.shape)}"))
+
+    model.load_state_dict(merged)
+
+    if logger is not None:
+        logger.info(
+            "Checkpoint load summary: "
+            f"exact={loaded_exact}, partial_dim0={loaded_partial}, skipped={len(skipped)}"
+        )
+        if loaded_partial > 0:
+            preview = ", ".join(
+                [f"{k} {s}->{t} overlap={o}" for k, s, t, o in partial_keys[:6]]
+            )
+            logger.info(f"Partial dim0-loaded keys (preview): {preview}")
+        if skipped:
+            preview = ", ".join([f"{k} ({why})" for k, why in skipped[:8]])
+            logger.info(f"Skipped keys (preview): {preview}")
+
+    return model
 
 
 def _extract_module_state(state_dict, prefixes):

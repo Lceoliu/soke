@@ -89,6 +89,11 @@ if "$PRETRAINED_VAE":
 if "$RESUME_CKPT":
     cfg.TRAIN.PRETRAINED = "$RESUME_CKPT"
     cfg.TRAIN.RESUME = ""
+else:
+    # Avoid inheriting default RESUME from base config (e.g. configs/soke.yaml),
+    # which may accidentally load an incompatible old LM checkpoint.
+    cfg.TRAIN.RESUME = ""
+    cfg.TRAIN.PRETRAINED = ""
 if "$NUM_WORKERS":
     cfg.TRAIN.NUM_WORKERS = int("$NUM_WORKERS")
 if "$ACCUMULATE_GRAD_BATCHES":

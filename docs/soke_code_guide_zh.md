@@ -1,463 +1,244 @@
-# SOKE 仓库代码导读与训练评估手册
+# SOKE 代码导读与训练评估手册（LFQ 最新版）
 
-本文档基于当前仓库代码整理，目标是让你可以按仓库真实实现完成：
-1. 数据准备与格式对齐
-2. 两阶段训练（Tokenizer + 生成器）
-3. 推理、可视化与评估
-
-> 如果你需要在 **MOTION-X 等超大规模数据上先预训练 VAE，再在手语数据上微调**，请配合阅读：`docs/vae_scaling_pipeline_zh.md`
+更新日期：2026-03-09  
+适用范围：当前 `LFQ` 分支（不再维护旧 VQ/RVQ 兼容训练路径）
 
 ---
 
-## 1. 项目整体架构
+## 1. 项目目标与当前主流程
 
-SOKE 是一个典型的两阶段流程：
+SOKE 当前可分为两个阶段：
 
-1. 阶段一（`STAGE=vae`）：训练离散化动作 Tokenizer（VQ-VAE）
-2. 阶段二（`STAGE=lm_pretrain/lm_instruct`）：训练文本到手语 token 的多头自回归生成器
+1. `STAGE=vae`：训练动作 tokenizer（LFQ VAE，分 body/lhand/rhand）
+2. `STAGE=lm_pretrain` / `lm_instruct`：训练下游 mBART 生成器（text -> sign token）
 
 核心入口：
-- 训练入口：`train.py`
-- 测试入口：`test.py`
-- 配置解析与实例化：`mGPT/config.py`
-- 数据模块构建：`mGPT/data/build_data.py`
-- 模型构建：`mGPT/models/build_model.py`
-- 统一模型壳：`mGPT/models/mgpt.py`（`MotionGPT`）
-
-配置驱动方式：
-- 所有模块通过 YAML 中 `target + params` 反射实例化
-- 通过 `OmegaConf` 合并 `configs/default.yaml` + 实验配置（如 `configs/deto.yaml` / `configs/soke.yaml`）
+- 训练：`train.py`
+- 测试：`test.py`
+- 配置解析：`mGPT/config.py`
+- 主模型：`mGPT/models/mgpt.py`
 
 ---
 
-## 2. 从原始数据到训练输入：处理流程与目录规范
+## 2. 当前代码结构（按模块）
 
-> 重点：本仓库训练直接使用“每帧 SMPL-X 参数 pkl”，不是直接从 RGB 视频端到端训练。  
-> 如果你只有原始视频，需要先在仓库外完成人体/手部拟合，得到每帧 3D 参数文件。
+### 2.1 Tokenizer 主干（LFQ）
 
-### 2.1 原始单帧数据格式（每个 pkl）
+- 文件：`mGPT/archs/mgpt_vq.py`
+- 量化器：`mGPT/archs/tools/quantize_lfq.py`
+- 当前分支强制 `quantizer='lfq'`
 
-代码在 `mGPT/data/humanml/load_data.py` 中固定读取以下 key：
+编码解码结构：
+1. `Encoder`（1D Conv + Resnet1D + 下采样）
+2. `ResidualLFQ`（多层残差二值量化）
+3. `Decoder`（Resnet1D + 上采样 + Conv）
 
-- `smplx_root_pose` (3)
-- `smplx_body_pose` (63)
-- `smplx_lhand_pose` (45)
-- `smplx_rhand_pose` (45)
-- `smplx_jaw_pose` (3)
-- `smplx_shape` (10)
-- `smplx_expr` (10)
+关键实现更新：
+- Decoder 上采样已改为 `mode='linear', align_corners=False`
+- Decoder 支持 `return_hidden=True`，用于接触分类旁支
 
-拼接后是 179 维。
+### 2.2 VAE 训练监督
 
-### 2.2 训练前特征裁剪规则（179 -> 133）
+- 文件：`mGPT/losses/mgpt.py`
+- 当前支持（可配开关）：
+  - `recons_feature`
+  - `recons_velocity`（支持 `VELOCITY_PART_WEIGHTS`）
+  - `recons_fk_hand`（wrist-relative）
+  - `recons_accel_hand`
+  - `recons_accel_wrist_rel`
+  - `recons_contact`（BCE with logits）
+  - `vq_commit`
 
-仓库统一做了两次裁剪：
+### 2.3 数据模块
 
-1. 去下半身：`clip_poses = clip_poses[:, (3 + 3*11):]`  
-2. 去 shape 参数：`concat([:-20], [-10:])`
+- 常规手语训练：`mGPT/data/H2S.py`（How2Sign/CSL/Phoenix）
+- 大规模预训练：`mGPT/data/LargeMotion.py`
 
-最终得到 **133 维**特征。
+H2S 现已支持可选接触标签读取：
+- `DATASET.H2S.USE_CONTACT_LABELS`
+- `DATASET.H2S.CONTACT_DIR_NAME`
 
-在模型里，133 维通常被视为：
-- `0:30`：上肢主体相关
-- `30:75`：左手（45）
-- `75:120`：右手（45）
-- `120:133`：其余（13，通常含 jaw/expr）
+### 2.4 LM 与 token 适配
 
-### 2.3 多数据源目录与注释文件
+- 文件：`mGPT/models/mgpt.py`
+- 对多层量化 token 使用共享层数：
+  - `shared_Q = min(body_Q, lhand_Q, rhand_Q)`
+- LM 侧输入采用展平方案：
+  - `[B, T, Q] -> [B, T*Q]`
 
-#### How2Sign
-- 文本标注：`data/How2Sign/{split}/re_aligned/how2sign_realigned_{split}_preprocessed_fps.csv`
-- 姿态目录：`data/How2Sign/{split}/poses/{SENTENCE_NAME}/..._3D.pkl`
+### 2.5 Checkpoint 兼容加载
 
-#### CSL-Daily
-- 标注：`data/CSL-Daily/csl_clean.{train|val|test}`（gzip pickle）
-- 姿态目录：`data/CSL-Daily/poses/{name}/*.pkl`
-
-#### Phoenix-2014T
-- 标注：`data/Phoenix_2014T/phoenix14t.{train|dev|test}`（代码中 `val` 对应 `dev`）
-- 姿态目录：`data/Phoenix_2014T/{name}/*.pkl`
-
-### 2.4 采样与长度处理
-
-- How2Sign 如果 fps > 24，会做均匀下采样到 24fps
-- 长度 < 最小阈值：均匀插值拉长到最小长度
-- 长度 > 最大阈值：均匀采样到最大长度
-- 其余：按 `UNIT_LEN` 对齐并居中裁剪
-
-主要参数在 `configs/soke.yaml` / `configs/deto.yaml`：
-- `DATASET.H2S.MAX_MOTION_LEN`
-- `DATASET.H2S.MIN_MOTION_LEN`
-- `DATASET.H2S.UNIT_LEN`
-
-### 2.5 归一化统计量（mean/std）
-
-在 `H2SDataModule` 中从配置读取：
-- `DATASET.H2S.MEAN_PATH`
-- `DATASET.H2S.STD_PATH`
-
-并应用与特征相同的裁剪规则后用于归一化。
+- 文件：`mGPT/utils/load_checkpoint.py`
+- 已加入旧 decoder key 的自动 remap（`decoder.model.* -> 新结构`）
+- 可继续加载历史 VAE ckpt（包含老命名）
 
 ---
 
-## 3. 数据格式说明（训练、token、预测结果）
+## 3. 数据格式与目录约定
 
-### 3.1 DataLoader 批字段（核心）
+### 3.1 动作特征
 
-`humanml3d_collate` 统一产出：
-- `motion`: `B x T x C`
-- `length`: 每条序列长度列表
-- `text`: 文本列表（文本任务）
-- `tasks`: 指令模板（LM 阶段）
-- `src`: 数据源（`how2sign/csl/phoenix`）
-- `name`: 样本 id
+当前训练统一使用 133 维（SOKE 布局）：
+- `0:30` upper body
+- `30:75` left hand
+- `75:120` right hand
+- `120:133` face/jaw/expr
 
-### 3.2 token 文件格式（`scripts/get_motion_code.py` 产物）
+### 3.2 token 文件
 
-输出到：`{data_root}/{CODE_PATH}/{src}/{name}.npy`
+`scripts/get_motion_code.py` 产物默认写到：
+- `{DATA_ROOT}/{CODE_PATH}/{src}/{name}.npy`
 
-常见形状：
-- body-only: `[1, T_code]`
-- body+hand: `[1, T_code, 2]`
-- body+lhand+rhand: `[1, T_code, 3]`
+LM 读取时支持多层 token（展平前可为 `[T, Q, P]` 或等价结构）。
 
-训练 LM 时读取 `np.load(...)[0]`，即 `T_code x heads`。
+### 3.3 接触标签文件
 
-### 3.3 测试预测文件格式
-
-若 `TEST.SAVE_PREDICTIONS=True`，测试会保存：
-- `results/mgpt/{EXP}/{split}_rank_{r}/{name}.pkl`
-- 字段：`feats_rst`, `feats_ref`, `text`
-
-同时保存每样本指标：
-- `results/mgpt/{EXP}/{split}_rank_{r}/test_scores.json`
+由 `scripts/pipeline/precompute_contact_labels.py` 预计算，单样本文件内容：
+- `labels: [T, 3]`（`uint8`）
+- 三个通道顺序：`lhand_rhand`, `lhand_face`, `rhand_face`
 
 ---
 
-## 4. 训练前准备（环境与依赖）
+## 4. 最新改动摘要（协作者需知）
 
-### 4.1 Python 环境
+1. VAE 量化已切换到 LFQ；旧 VQ/RVQ 不再作为主路径维护。
+2. Decoder 上采样从 nearest 改为 linear。
+3. 新增 Contact Head（解码器隐层旁支）+ `LAMBDA_CONTACT`。
+4. 新增 FK/加速度损失链：
+   - `LAMBDA_FK_HAND`
+   - `LAMBDA_ACCEL_HAND`
+   - `LAMBDA_ACCEL_WRIST_REL`
+5. 支持 body-only 预训练加载（hand/rhand 随机初始化）用于消融。
+6. LM 下游新增一键脚本，自动训练 + BLEU eval + t2m 可视化。
+7. 修复 `m2t` 测试阶段返回兼容问题，避免自动评估崩溃。
+8. `scripts/get_motion_code.py` 已清理调试 shape 输出并修复模块导入路径。
+
+---
+
+## 5. 训练流程（推荐）
+
+### 5.1 阶段一：MotionX 上 LFQ 预训练
 
 ```bash
-conda create -n soke python=3.10 -y
 conda activate soke
-pip install -r requirements.txt
+GPU_IDS=0,1,2,3,4,5,6,7 \
+CFG=configs/vae/motionx_vae_pretrain_lfq4.yaml \
+bash scripts/pipeline/train_vae_pretrain_lfq4_ddp.sh
 ```
 
-说明：
-- 优先尝试终端中是否存在 `soke` 环境，若不存在，再考虑创建。
-- 当前终端中 `python` 可能未建立别名，建议优先用 `python3`。
+默认脚本包含：
+- DDP 启动
+- 训练结束后自动 report + 重建可视化（可通过 `AUTO_POST=0` 关闭）
 
-### 4.2 模型与外部依赖
+### 5.2 （可选）预计算接触标签
 
-1. SMPL/SMPL-X 人体模型放到：`deps/smpl_models`
-2. mBART 模型放到：`deps/mbart-h2s-csl-phoenix`
-3. 下载 evaluator：`prepare/download_t2m_evalutors.sh`
-4. 若用 T5 分支，下载 T5：`prepare/prepare_t5.sh`
+```bash
+conda activate soke
+DATASET=all SPLITS=train,val,test \
+HOW2SIGN_ROOT=data/How2Sign \
+CSL_ROOT=data/CSL-Daily \
+PHOENIX_ROOT=data/Phoenix_2014T \
+OUTPUT_DIR_NAME=contact_labels \
+THRESHOLD=0.02 \
+bash scripts/pipeline/precompute_contact_labels_all.sh
+```
+
+### 5.3 阶段一.5：手语微调（LFQ + FK + ACC + Contact）
+
+```bash
+conda activate soke
+PRETRAINED_BODY_CKPT=/home/SOKE/experiments/mgpt/VAE_MOTIONX_PRETRAIN_LFQ4_C128H256/checkpoints/last.ckpt \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+CFG=configs/vae/vae_finetune_sign_lfq4_fkhand_body_pretrained.yaml \
+bash scripts/pipeline/train_vae_finetune_sign_lfq4_fkhand_body_pretrained_ddp.sh
+```
 
 ---
 
-## 5. 开始训练：完整操作步骤
+## 6. 下游 LM 训练与自动评估
 
-## 5.1 阶段一：训练 Tokenizer（DETO）
+### 6.1 一键脚本（推荐）
 
-配置：`configs/deto.yaml`（`TRAIN.STAGE: vae`）
+脚本：`scripts/pipeline/train_lm_downstream_auto.sh`
 
-```bash
-python3 train.py --cfg configs/deto.yaml --nodebug
-```
-
-或（README 方式）
-
-```bash
-python3 -m train --cfg configs/deto.yaml --nodebug
-```
-
-阶段一测试：
-
-```bash
-python3 test.py --cfg configs/deto.yaml --nodebug
-```
-
-产物：
-- 实验目录：`experiments/mgpt/DETO`（按 `NAME` 和 logger 规则）
-- checkpoint：`experiments/mgpt/DETO/checkpoints/last.ckpt`
-
-## 5.2 中间步骤：离线提取 motion token
-
-README 写法是 `python -m get_motion_code`，但仓库脚本实际在 `scripts/get_motion_code.py`。
-
-推荐命令：
-
-```bash
-python3 scripts/get_motion_code.py --cfg configs/soke.yaml --nodebug
-```
-
-该脚本会：
-1. 强制 `cfg.TRAIN.STAGE = "token"`
-2. 加载 `TRAIN.PRETRAINED_VAE`
-3. 把每个样本编码为 token 并保存到 `DATASET.CODE_PATH`
-
-## 5.3 阶段二：训练生成器（SOKE）
-
-配置：`configs/soke.yaml`（`TRAIN.STAGE: lm_pretrain`）
-
-先确认：
-- `TRAIN.PRETRAINED_VAE` 指向阶段一 tokenizer ckpt
-- `DATASET.CODE_PATH` 指向上一步 token 输出目录
-- `DATASET.H2S.ROOT/CSL_ROOT/PHOENIX_ROOT` 路径正确
-
-启动训练：
-
-```bash
-python3 train.py --cfg configs/soke.yaml --nodebug
-```
-
-也可用带 NCCL 诊断的脚本：
-
-```bash
-bash start_train.sh configs/soke.yaml
-```
-
-## 5.4 训练命令常用参数
-
-`mGPT/config.py` 支持关键 CLI：
-- `--cfg`: 主配置文件
-- `--cfg_assets`: 资产路径配置（默认 `configs/assets.yaml`）
-- `--use_gpus`: 设置 `CUDA_VISIBLE_DEVICES`
-- `--batch_size`: 覆盖 `TRAIN.BATCH_SIZE`
-- `--device`: 覆盖 `DEVICE` 列表
-- `--num_nodes`: 多机节点数
-- `--task`: 测试任务（如 `t2m/m2t`）
-- `--nodebug`: 关闭 debug
-
-注意：
-- 训练时未传 `--nodebug` 可能进入 debug 逻辑（会改名字、降低验证间隔、WandB 离线）
-- 测试阶段代码会强制 `DEBUG=False`
-
-## 5.5 训练后自动评估与可视化（Bash 脚本）
-
-若使用 pipeline 脚本（如 `scripts/pipeline/train_vae_pretrain_rvq4_ddp.sh`、`scripts/pipeline/train_vae_finetune_sign_ddp.sh`），训练结束后会自动执行：
-
-1. Loss/Codebook 报告生成（RVQ 场景）
-2. train/test 抽样重建视频生成（`tokenize_reconstruct_mesh_one.py`）
-
-主要开关（环境变量）：
-- `AUTO_POST=0`：关闭自动后处理
-- `AUTO_POST_STRICT=1`：后处理失败时返回非零
-- `AUTO_POST_DEVICE=cuda|cpu`：后处理设备
-- `AUTO_REPORT_MAX_SAMPLES=3000`：报告统计样本上限
-- `AUTO_VIS_TRAIN=2`、`AUTO_VIS_TEST=2`：可视化样本数
+功能：
+1. 可选 token 预生成（`PREPARE_TOKENS=1`）
+2. LM 训练
+3. 训练后自动跑 `m2t`（BLEU/ROUGE）
+4. 自动跑 `t2m` 预测并抽样 mesh 可视化
 
 示例：
 
 ```bash
-AUTO_POST=1 AUTO_POST_DEVICE=cuda AUTO_VIS_TRAIN=3 AUTO_VIS_TEST=3 \
-bash scripts/pipeline/train_vae_finetune_sign_rvq4_ddp.sh
+conda activate soke
+GPU_IDS=0,1,2,3,4,5,6,7 \
+PRETRAINED_VAE=/home/SOKE/experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt \
+EXP_NAME=SOKE_LFQ4_ACC_LM \
+PREPARE_TOKENS=1 \
+AUTO_EVAL_BLEU=1 \
+AUTO_VIS=1 \
+VIS_NUM_SAMPLES=12 \
+VIS_CAM_Y=-0.5 \
+bash scripts/pipeline/train_lm_downstream_auto.sh
 ```
+
+仅做后处理（不训练）：
+
+```bash
+TRAIN_LM=0 \
+EVAL_CKPT=experiments/mgpt/SOKE_LFQ4_ACC_LM/checkpoints/last.ckpt \
+AUTO_EVAL_BLEU=1 AUTO_VIS=1 \
+bash scripts/pipeline/train_lm_downstream_auto.sh
+```
+
+### 6.2 关键输出目录
+
+- 训练实验：`experiments/mgpt/<EXP_NAME>`
+- 测试预测：`results/mgpt/<EXP_NAME>/<split>_rank_*`
+- 下游自动报告：
+  - `experiments/mgpt/<EXP_NAME>/auto_reports/downstream/bleu_eval_summary.txt`
+  - `experiments/mgpt/<EXP_NAME>/auto_reports/downstream/visualization_summary.txt`
+- 自动可视化：`experiments/mgpt/<EXP_NAME>/auto_vis/<timestamp>/videos`
 
 ---
 
-## 6. 关键参数作用（按配置文件）
+## 7. 手动 eval（按任务）
 
-### 6.1 `TRAIN` 段
-- `STAGE`: 决定走 VAE 还是 LM 训练分支
-- `PRETRAINED_VAE`: LM 阶段加载 tokenizer 权重
-- `PRETRAINED` / `RESUME`: 恢复训练/测试 checkpoint
-- `BATCH_SIZE`, `NUM_WORKERS`, `END_EPOCH`
-- `OPTIM`, `LR_SCHEDULER`
+### 7.1 m2t（BLEU/ROUGE）
 
-### 6.2 `DATASET` 段
-- `target`: 数据模块类型（SOKE 用 `mGPT.data.H2S.H2SDataModule`）
-- `H2S.DATASET_NAME`: 控制混合哪些数据源（如 `how2sign_csl_phoenix`）
-- `CODE_PATH`: 离线 token 根目录名
-- `TASK_PATH`: 指令模板路径（可覆盖默认模板）
-- `MEAN_PATH/STD_PATH`: 归一化统计量
+```bash
+python test.py --cfg <eval_cfg.yaml> --nodebug --task m2t --use_gpus 0 --device 0
+```
 
-### 6.3 `model.params` 段
-- `motion_vae`: body tokenizer 配置（如 `vq.re96`）
-- `hand_vae_cfg` / `rhand_vae_cfg`: 手部 tokenizer
-- `motion_vae.params.quantizer`: 量化器类型（如 `ema_reset` 或 `rvq_ema_reset`）
-- `motion_vae.params.num_quantizers`: RVQ 级数（仅在 `rvq_ema_reset` 下生效）
-- `lm`: 语言模型配置（SOKE 用 mBART multi-head）
-- `task`: 当前任务（常见 `t2m`）
+要求：
+- `model.params.task = m2t`
+- `METRIC.TYPE = [M2TMetrics]`
 
-### 6.4 `LOSS` 段（VAE 常用）
-- `LAMBDA_FEATURE`: 特征重建损失权重
-- `LAMBDA_VELOCITY`: 速度重建损失总权重
-- `LAMBDA_COMMIT`: VQ commit 损失权重
-- `PART_WEIGHTS`: 对 133 维特征重建项按 `UPPER/HAND/FACE` 分部位加权
-- `VELOCITY_PART_WEIGHTS`: 对速度项按 `UPPER/HAND/FACE` 分部位加权（等效分部位 velocity lambda）
+### 7.2 t2m（DTW/动作指标）
 
-### 6.5 `METRIC` 与 `TEST`
-- `METRIC.TYPE`: 启用哪类指标（`MRMetrics`, `TM2TMetrics`, `M2TMetrics`）
-- `TEST.REPLICATION_TIMES`: 重复测试次数
-- `TEST.SAVE_PREDICTIONS`: 是否落盘预测结果
+```bash
+python test.py --cfg <eval_cfg.yaml> --nodebug --task t2m --use_gpus 0 --device 0
+```
+
+要求：
+- `model.params.task = t2m`
+- `METRIC.TYPE = [TM2TMetrics]`
 
 ---
 
-## 7. 推理与评估
+## 8. 协作改动建议（避免踩坑）
 
-## 7.1 文本到手语（t2m）推理
-
-```bash
-python3 test.py --cfg configs/soke.yaml --task t2m
-```
-
-默认行为：
-- 若 `TEST.CHECKPOINTS` 为空，自动取 `experiments/.../checkpoints/last.ckpt`
-- 按 `TEST.REPLICATION_TIMES` 重复评估并输出均值
-
-## 7.2 评估指标说明
-
-### VAE 阶段（`MRMetrics`）
-- 关注重建质量
-- 主要为 MPJPE/MPVPE（含 PA 与非 PA），按 `how2sign/csl/phoenix` 分别统计
-
-### LM 阶段 t2m（`TM2TMetrics`）
-- 主要为 DTW 对齐后的关节误差
-- 分 `body/lhand/rhand` 与不同数据源统计
-
-### m2t（`M2TMetrics`）
-- 文本生成指标：BLEU-1..4 与 ROUGE-L
-
-## 7.3 结果输出位置
-
-- 训练日志与 ckpt：`experiments/mgpt/{NAME}`
-- 测试结果与样本预测：`results/mgpt/{NAME}`
-- 若使用带自动后处理的 pipeline 脚本，还会新增：
-  - `experiments/mgpt/{NAME}/auto_reports/rvq_stage1`
-  - `experiments/mgpt/{NAME}/auto_vis/train`
-  - `experiments/mgpt/{NAME}/auto_vis/test`
+1. 改 `num_quantizers` 后，必须确认 LM token flatten/unflatten 路径一致。  
+2. 分部位量化层数不一致时，默认使用 `shared_Q=min(...)`；不要直接假设三部分层数相同。  
+3. 载入旧 ckpt 时若 key 不匹配，优先检查 `load_checkpoint.py` remap 是否生效。  
+4. 新增 loss 名称建议保持 `prefix_name`（例如 `recons_xxx`），避免日志拆分逻辑报错。  
+5. 大规模训练前先跑小样本 smoke（含 tokenize -> train -> test 一整条链路）。
 
 ---
 
-## 8. 可视化方法
+## 9. 相关文档
 
-### 8.1 快速 mesh 可视化
-
-```bash
-python3 vis_mesh.py --cfg configs/soke.yaml --demo_dataset csl
-```
-
-用途：
-- 读取测试结果对比 baseline / ours
-- 输出视频对比与可选 mesh 文件
-
-### 8.2 并行可视化
-
-```bash
-python3 vis_mesh_parallel.py --cfg configs/soke.yaml --demo_dataset csl
-```
-
-用途：
-- 多进程并行处理样本
-- 适合批量渲染
-
-### 8.3 单样本 tokenizer 重建检查
-
-```bash
-python3 scripts/tokenize_reconstruct_one.py \
-  --cfg configs/soke.yaml \
-  --pose_dir <你的单样本帧目录> \
-  --tokenizer_ckpt experiments/mgpt/vae/checkpoints/tokenizer.ckpt
-```
-
-Mesh 视频版：
-
-```bash
-python3 scripts/tokenize_reconstruct_mesh_one.py \
-  --cfg configs/soke.yaml \
-  --pose_dir <你的单样本帧目录> \
-  --tokenizer_ckpt experiments/mgpt/vae/checkpoints/tokenizer.ckpt
-```
-
-### 8.4 原始 SMPL-X 数据体检（不经过 VQ/VAE）
-
-用于排查“数据本身有问题”还是“VQ-VAE 重建损失导致问题”。
-
-直接从原始提取的 SMPL-X 参数渲染 mesh：
-
-```bash
-python3 scripts/visualize_smplx_raw_mesh.py \
-  --pose_dir data/How2Sign/test/poses/<sample_name> \
-  --max_frames 120 \
-  --fps 18
-```
-
-如果你手里是 `npy` 序列：
-
-```bash
-# 179维（root/body/lhand/rhand/jaw/shape/expr）
-python3 scripts/visualize_smplx_raw_mesh.py \
-  --pose_npy <clip_179.npy> \
-  --input_type pose179
-
-# 133维标准化特征（需要mean/std反归一化）
-python3 scripts/visualize_smplx_raw_mesh.py \
-  --pose_npy <clip_133_norm.npy> \
-  --input_type feat133_norm \
-  --mean_path data/CSL-Daily/mean.pt \
-  --std_path data/CSL-Daily/std.pt
-```
-
-说明：
-- 输出目录：`visualize/raw_smplx_mesh/<sample_name>/`
-- 关键产物：`*_raw_mesh.mp4`
-- 脚本需要 CUDA（当前 `get_coord` 依赖 CUDA SMPL-X layer）
-- 若 OpenGL 初始化失败，可显式设置：`PYOPENGL_PLATFORM=egl` 或 `PYOPENGL_PLATFORM=osmesa`
-- 若视角仍有偏差，可调：`--mesh_rx_deg/--mesh_ry_deg/--mesh_rz_deg`
-
-### 8.5 Blender 高质量渲染
-
-```bash
-python3 vis_blender.py
-```
-
-需先配置 `BlenderToolBox/` 和 blender 相关环境。
-
----
-
-## 9. 训练与调试建议
-
-1. 先跑通 `deto.yaml` 的小批量训练，确认 VAE 可收敛
-2. 再跑 `scripts/get_motion_code.py`，抽查 `CODE_PATH` 下 token 是否完整
-3. 最后启动 `soke.yaml` 训练
-4. 多卡训练优先用 `start_train.sh`，便于定位 NCCL 问题
-5. 若结果异常，优先检查：
-- `PRETRAINED_VAE` 是否正确
-- `CODE_PATH` 是否与 tokenizer 版本匹配
-- mean/std 与数据域是否一致
-- `DATASET_NAME` 与根目录路径是否对应
-
----
-
-## 10. 与 README 的一个实践差异
-
-README 给出：
-
-```bash
-python -m get_motion_code --cfg configs/soke.yaml --nodebug
-```
-
-但当前仓库脚本在 `scripts/get_motion_code.py`，推荐直接：
-
-```bash
-python3 scripts/get_motion_code.py --cfg configs/soke.yaml --nodebug
-```
-
----
-
-## 11. Scaling 入口（新增）
-
-针对超大规模数据（MOTION-X 等）与“VAE 预训练 -> 手语微调”需求，仓库已新增完整 pipeline，详见：
-
-- `docs/vae_scaling_pipeline_zh.md`
-
-对应核心文件：
-
-- 数据模块：`mGPT/data/LargeMotion.py`
-- 预处理脚本：`scripts/pipeline/preprocess_vae_corpus.py`
-- 流式统计：`scripts/pipeline/compute_mean_std_stream.py`
-- 训练脚本：`scripts/pipeline/train_vae_pretrain_ddp.sh`、`scripts/pipeline/train_vae_finetune_sign_ddp.sh`
-- 配置：`configs/vae/large_vae_pretrain.yaml`、`configs/vae/vae_finetune_sign.yaml`
+- 架构细节：`docs/model_construction_changelog.md`
+- Loss 更新：`docs/loss_update_changelog.md`
+- 大规模数据 pipeline：`docs/vae_scaling_pipeline_zh.md`
+- 自定义数据接入：`docs/data_onboarding_guide_zh.md`
