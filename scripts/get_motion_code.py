@@ -1,8 +1,9 @@
 import os
 import sys
+import json
 import numpy as np
 import pytorch_lightning as pl
-import torch, json
+import torch
 from pathlib import Path
 from tqdm import tqdm
 
@@ -31,6 +32,22 @@ def flatten_token_levels(token_tensor, q_keep=None):
     return token_tensor, 1
 
 
+def build_token_cache_meta(cfg):
+    train_cfg = cfg.TRAIN
+    model_params = cfg.model.params
+    return {
+        "pretrained_vae": str(train_cfg.get("PRETRAINED_VAE", "") or ""),
+        "pretrained_vae_body": str(train_cfg.get("PRETRAINED_VAE_BODY", "") or ""),
+        "pretrained_vae_hand": str(train_cfg.get("PRETRAINED_VAE_HAND", "") or ""),
+        "pretrained_vae_rhand": str(train_cfg.get("PRETRAINED_VAE_RHAND", "") or ""),
+        "dataset_name": str(cfg.DATASET.H2S.get("DATASET_NAME", "") or ""),
+        "code_path": str(cfg.DATASET.get("CODE_PATH", "") or ""),
+        "motion_vae": str(model_params.motion_vae),
+        "hand_vae_cfg": str(model_params.get("hand_vae_cfg", None)),
+        "rhand_vae_cfg": str(model_params.get("rhand_vae_cfg", None)),
+    }
+
+
 def main():
     # parse options
     cfg = parse_args(phase="test")  # parse config file
@@ -50,8 +67,9 @@ def main():
     datasets = build_data(cfg, phase='token')
     print("datasets module initialized")
     output_dir = os.path.join(datasets.hparams.data_root, cfg.DATASET.CODE_PATH)
-
     os.makedirs(output_dir, exist_ok=True)
+    meta_path = os.path.join(output_dir, "_tokenizer_meta.json")
+    cache_meta = build_token_cache_meta(cfg)
 
     # create model
     model = build_model(cfg, datasets)
@@ -66,21 +84,26 @@ def main():
     if cfg.ACCELERATOR == "gpu":
         model = model.to('cuda')
 
-    save_data = {}
+    skip_existing = os.environ.get("SKIP_EXISTING_TOKENS", "1") == "1"
+    overwrite_meta = os.environ.get("OVERWRITE_TOKEN_META", "1") == "1"
+    num_done = 0
+    num_skipped_existing = 0
     for batch in tqdm(datasets.train_dataloader(),
                       desc=f'motion tokenize'):
         name = batch['text']
-        
-        pose = batch['motion']
         src = batch['src'][0]
-        pose = pose.cuda().float()
-
-        if pose.shape[1] == 0:
-            continue
-        
         output_dir = os.path.join(datasets.hparams.data_root, cfg.DATASET.CODE_PATH, src)
         target_path = os.path.join(output_dir, name[0] + '.npy')
         Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+        if skip_existing and os.path.exists(target_path):
+            num_skipped_existing += 1
+            continue
+
+        pose = batch['motion']
+        pose = pose.cuda().float()
+        if pose.shape[1] == 0:
+            continue
+
         if hasattr(model, 'hand_vae') and hasattr(model, 'rhand_vae'):
             pose_lhand = pose[..., 30:75]
             pose_rhand = pose[..., 75:120]
@@ -126,12 +149,15 @@ def main():
                 target = target.to('cpu').numpy()
 
         np.save(target_path, target)
+        num_done += 1
 
-    # with open('./iso_motion_code.json', 'w') as f:
-    #     json.dump(save_data, f)
+    if overwrite_meta:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(cache_meta, f, indent=2, ensure_ascii=True)
 
     print(
-        f'Motion tokenization done, the motion tokens are saved to {output_dir}'
+        f"Motion tokenization done. saved={num_done}, skipped_existing={num_skipped_existing}, "
+        f"tokens are under {output_dir}"
     )
 
 

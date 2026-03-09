@@ -882,6 +882,14 @@ class MotionGPT(BaseModel):
                             src=src,
                             name=name
                         )
+                    if "M2TMetrics" in self.hparams.metrics_dict:
+                        rs_set_m2t = self.val_m2t_forward(batch)
+                        getattr(self.metrics, 'M2TMetrics').update(
+                            pred_texts=rs_set_m2t["t_pred"],
+                            gt_texts=rs_set_m2t["t_ref"],
+                            lengths=rs_set_m2t['length'],
+                            src=src,
+                        )
                 elif self.hparams.task == "m2t":
                     rs_set_m2t = self.val_m2t_forward(batch)
                     getattr(self.metrics, 'M2TMetrics').update(

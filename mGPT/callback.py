@@ -57,6 +57,12 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         "BLEU_2": "Metrics/Bleu_2",
         "BLEU_3": "Metrics/Bleu_3",
         "BLEU_4": "Metrics/Bleu_4",
+        "how2sign_BLEU_1": "Metrics/how2sign_Bleu_1",
+        "how2sign_BLEU_4": "Metrics/how2sign_Bleu_4",
+        "csl_BLEU_1": "Metrics/csl_Bleu_1",
+        "csl_BLEU_4": "Metrics/csl_Bleu_4",
+        "phoenix_BLEU_1": "Metrics/phoenix_Bleu_1",
+        "phoenix_BLEU_4": "Metrics/phoenix_Bleu_4",
         "ROUGE_L": "Metrics/ROUGE_L",
     }
     callbacks.append(
@@ -95,19 +101,20 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
     }
     # callbacks.append(ModelCheckpoint(**checkpointParams))
 
-    # Save the best checkpoint by validation total loss.
-    # `total/val` is logged in BaseLosses.loss2logname() + BaseModel.on_validation_epoch_end().
-    val_loss_ckpt_params = {
-        'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
-        'filename': "min-val_loss-{epoch}",
-        'monitor': "total/val",
-        'mode': "min",
-        'save_top_k': 1,
-        'save_last': False,
-        'save_on_train_epoch_end': False,
-        'every_n_epochs': None,
-    }
-    callbacks.append(ModelCheckpoint(**val_loss_ckpt_params))
+    # Only VAE stage logs `total/val`. LM validation is metric-only and does not
+    # produce a validation loss scalar, so monitoring `total/val` there would crash.
+    if cfg.TRAIN.STAGE == 'vae':
+        val_loss_ckpt_params = {
+            'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+            'filename': "min-val_loss-{epoch}",
+            'monitor': "total/val",
+            'mode': "min",
+            'save_top_k': 1,
+            'save_last': False,
+            'save_on_train_epoch_end': False,
+            'every_n_epochs': None,
+        }
+        callbacks.append(ModelCheckpoint(**val_loss_ckpt_params))
 
     metrics = cfg.METRIC.TYPE
     metric_monitor_map = {
@@ -146,6 +153,18 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         'M2TMetrics': {
             'Metrics/Bleu_4': {
                 'abbr': 'BLEU_4',
+                'mode': 'max'
+            },
+            'Metrics/how2sign_Bleu_4': {
+                'abbr': 'how2sign_BLEU_4',
+                'mode': 'max'
+            },
+            'Metrics/csl_Bleu_4': {
+                'abbr': 'csl_BLEU_4',
+                'mode': 'max'
+            },
+            'Metrics/phoenix_Bleu_4': {
+                'abbr': 'phoenix_BLEU_4',
                 'mode': 'max'
             },
             'Metrics/ROUGE_L': {

@@ -61,6 +61,8 @@ class M2TMetrics(Metric):
         # Chached batches
         self.pred_texts = []
         self.gt_texts = []
+        self.src_pred_texts = {"how2sign": [], "csl": [], "phoenix": []}
+        self.src_gt_texts = {"how2sign": [], "csl": [], "phoenix": []}
 
         # if self.cfg.model.params.task == 'm2t':
         #     from nlgmetricverse import NLGMetricverse, load_metric
@@ -75,9 +77,6 @@ class M2TMetrics(Metric):
 
     @torch.no_grad()
     def compute(self, sanity_flag):
-        count = self.count.item()
-        count_seq = self.count_seq.item()
-
         # Init metrics dict
         metrics = {metric: getattr(self, metric) for metric in self.metrics}
 
@@ -88,8 +87,12 @@ class M2TMetrics(Metric):
         print("Computing metrics...")
 
         # NLP metrics
-        bleu_scores = bleu(self.gt_texts, self.pred_texts, level=self.level)
-        rouge_score = rouge(self.gt_texts, self.pred_texts, level=self.level)
+        if len(self.gt_texts) > 0:
+            bleu_scores = bleu(self.gt_texts, self.pred_texts, level='word')
+            rouge_score = rouge(self.gt_texts, self.pred_texts, level='word')
+        else:
+            bleu_scores = {f'bleu{k}': 0.0 for k in range(1, self.bleu_k + 1)}
+            rouge_score = 0.0
         for k in range(1, self.bleu_k + 1):
             metrics[f"Bleu_{str(k)}"] = torch.tensor(bleu_scores[f'bleu{str(k)}'], device=self.device)
             all_reduce(metrics[f"Bleu_{str(k)}"], op=ReduceOp.AVG)
@@ -99,10 +102,36 @@ class M2TMetrics(Metric):
         all_reduce(metrics["ROUGE_L"], op=ReduceOp.AVG)
         print('ROUGE_L: ', metrics["ROUGE_L"])
 
+        source_bleu1 = []
+        source_bleu4 = []
+        for src_name in ["how2sign", "csl", "phoenix"]:
+            level = 'char' if src_name == 'csl' else 'word'
+            if len(self.src_gt_texts[src_name]) > 0:
+                src_bleu = bleu(self.src_gt_texts[src_name], self.src_pred_texts[src_name], level=level)
+                bleu1 = src_bleu['bleu1']
+                bleu4 = src_bleu['bleu4']
+            else:
+                bleu1 = 0.0
+                bleu4 = 0.0
+            metrics[f"{src_name}_Bleu_1"] = torch.tensor(bleu1, device=self.device)
+            metrics[f"{src_name}_Bleu_4"] = torch.tensor(bleu4, device=self.device)
+            all_reduce(metrics[f"{src_name}_Bleu_1"], op=ReduceOp.AVG)
+            all_reduce(metrics[f"{src_name}_Bleu_4"], op=ReduceOp.AVG)
+            source_bleu1.append(metrics[f"{src_name}_Bleu_1"])
+            source_bleu4.append(metrics[f"{src_name}_Bleu_4"])
+            print(f"{src_name}_Bleu_1: ", metrics[f"{src_name}_Bleu_1"])
+            print(f"{src_name}_Bleu_4: ", metrics[f"{src_name}_Bleu_4"])
+
+        # Use the cross-dataset mean as the global BLEU monitor for checkpointing.
+        metrics["Bleu_1"] = torch.stack(source_bleu1).mean()
+        metrics["Bleu_4"] = torch.stack(source_bleu4).mean()
+
         # Reset
         self.reset()
         self.gt_texts = []
         self.pred_texts = []
+        self.src_gt_texts = {"how2sign": [], "csl": [], "phoenix": []}
+        self.src_pred_texts = {"how2sign": [], "csl": [], "phoenix": []}
 
         return {**metrics}
 
@@ -113,16 +142,13 @@ class M2TMetrics(Metric):
                lengths: List[int],
                src: List[str]
                ):
-        # only for monolinfual bakc trans!!
-        if src[0] == 'csl':
-            self.level = 'char'
-        else:
-            self.level = 'word'
-
         self.count += sum(lengths)
         self.count_seq += len(lengths)
 
-        # print(pred_texts, gt_texts, self.level)
-
         self.pred_texts.extend(pred_texts)
         self.gt_texts.extend(gt_texts)
+        for pred_text, gt_text, src_name in zip(pred_texts, gt_texts, src):
+            if src_name not in self.src_pred_texts:
+                continue
+            self.src_pred_texts[src_name].append(pred_text)
+            self.src_gt_texts[src_name].append(gt_text)

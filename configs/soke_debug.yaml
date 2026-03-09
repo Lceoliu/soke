@@ -58,7 +58,7 @@ DATASET:
   CODE_PATH: TOKENS_h2s_csl_phoenix
 
 METRIC:
-  TYPE: ['TM2TMetrics']
+  TYPE: ['TM2TMetrics', 'M2TMetrics']
 
 LOSS:
   LAMBDA_FEATURE: 1.0
@@ -80,7 +80,7 @@ model:
 
 LOGGER:
   TYPE: ['wandb']
-  VAL_EVERY_STEPS: 5
+  VAL_EVERY_STEPS: 15
   WANDB:
     params:
       project: SLG_DEBUG

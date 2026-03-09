@@ -29,6 +29,7 @@ CODE_PATH=${CODE_PATH:-""}
 
 # Stage switches
 PREPARE_TOKENS=${PREPARE_TOKENS:-0}
+FORCE_RETOKENIZE=${FORCE_RETOKENIZE:-0}
 TRAIN_LM=${TRAIN_LM:-1}
 AUTO_EVAL_BLEU=${AUTO_EVAL_BLEU:-1}
 AUTO_VIS=${AUTO_VIS:-1}
@@ -148,13 +149,60 @@ cleanup_train() {
   fi
 }
 
+should_skip_tokenize() {
+  local meta_path="$1"
+  [[ "$FORCE_RETOKENIZE" == "1" ]] && return 1
+  [[ ! -f "$meta_path" ]] && return 1
+  RUN_CFG_ENV="$RUN_CFG" META_PATH_ENV="$meta_path" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+from omegaconf import OmegaConf
+
+cfg = OmegaConf.load(os.environ["RUN_CFG_ENV"])
+meta_path = os.environ["META_PATH_ENV"]
+with open(meta_path, "r", encoding="utf-8") as f:
+    old = json.load(f)
+cur = {
+    "pretrained_vae": str(cfg.TRAIN.get("PRETRAINED_VAE", "") or ""),
+    "pretrained_vae_body": str(cfg.TRAIN.get("PRETRAINED_VAE_BODY", "") or ""),
+    "pretrained_vae_hand": str(cfg.TRAIN.get("PRETRAINED_VAE_HAND", "") or ""),
+    "pretrained_vae_rhand": str(cfg.TRAIN.get("PRETRAINED_VAE_RHAND", "") or ""),
+    "dataset_name": str(cfg.DATASET.H2S.get("DATASET_NAME", "") or ""),
+    "code_path": str(cfg.DATASET.get("CODE_PATH", "") or ""),
+    "motion_vae": str(cfg.model.params.motion_vae),
+    "hand_vae_cfg": str(cfg.model.params.get("hand_vae_cfg", None)),
+    "rhand_vae_cfg": str(cfg.model.params.get("rhand_vae_cfg", None)),
+}
+raise SystemExit(0 if old == cur else 1)
+PY
+}
+
 if [[ "$PREPARE_TOKENS" == "1" ]]; then
-  echo "[1/4] Preparing motion tokens ..."
-  "$PYTHON_BIN" scripts/get_motion_code.py \
-    --cfg "$RUN_CFG" \
-    --nodebug \
-    --use_gpus "$EVAL_GPU" \
-    --device 0
+  CODE_ROOT=$($PYTHON_BIN - <<PY
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("$RUN_CFG")
+print(f"{cfg.DATASET.H2S.ROOT}/{cfg.DATASET.CODE_PATH}")
+PY
+)
+  META_PATH="${CODE_ROOT}/_tokenizer_meta.json"
+  TOKEN_SKIP_EXISTING=1
+  if [[ "$FORCE_RETOKENIZE" == "1" ]]; then
+    TOKEN_SKIP_EXISTING=0
+  elif [[ -f "$META_PATH" ]] && ! should_skip_tokenize "$META_PATH"; then
+    # Cache metadata exists but no longer matches current tokenizer setup.
+    # Rebuild all tokens in-place to avoid mixing stale/new tokenizations.
+    TOKEN_SKIP_EXISTING=0
+  fi
+  if should_skip_tokenize "$META_PATH"; then
+    echo "[1/4] Reusing cached motion tokens at $CODE_ROOT"
+  else
+    echo "[1/4] Preparing motion tokens ..."
+    SKIP_EXISTING_TOKENS="$TOKEN_SKIP_EXISTING" "$PYTHON_BIN" scripts/get_motion_code.py \
+      --cfg "$RUN_CFG" \
+      --nodebug \
+      --use_gpus "$EVAL_GPU" \
+      --device 0
+  fi
 fi
 
 if [[ "$TRAIN_LM" == "1" ]]; then
