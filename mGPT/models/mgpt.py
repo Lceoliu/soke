@@ -520,40 +520,38 @@ class MotionGPT(BaseModel):
         all_captions = [c[0] for c in batch['all_captions']]
 
         # Motion Encode
+        #
+        # Current LM m2t generation path only consumes the serialized body/remainder
+        # motion stream as encoder input. Hand/rhand token prompts are not used in
+        # generate_conditional(task="m2t"), so we should not try to encode them here.
+        #
+        # When hand/rhand tokenizers exist, keep the body stream on the same shared-Q
+        # budget as LM training for length consistency, but avoid feeding 45-dim hand
+        # VAEs with concatenated 90-dim left+right features.
         motion_tokens = []
-        hand_tokens = []
         lengths_tokens = []
-        feats_ref_hand = feats_ref[..., 30:120]
-        feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-        for i in range(len(feats_ref)):
-            if self.hand_vae_cfg is None:
-                motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
-                flat_motion, len_motion = self._flatten_single_tokens_for_lm(
-                    motion_token[0], self.lm_body_num_quantizers
-                )
-                motion_tokens.append(flat_motion)
-                lengths_tokens.append(len_motion)
+        if self.hand_vae_cfg is None and self.rhand_vae_cfg is None:
+            feats_ref_body = feats_ref
+            q_use = self.lm_body_num_quantizers
+        else:
+            feats_ref_body = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
+            q_use = self.lm_shared_num_quantizers
 
-            else:
-                motion_token, _ = self.vae.encode(feats_ref_re[i:i+1])
-                hand_token, _ = self.hand_vae.encode(feats_ref_hand[i:i+1])
-                flat_motion, len_motion = self._flatten_single_tokens_for_lm(
-                    motion_token[0], self.lm_shared_num_quantizers
-                )
-                flat_hand, len_hand = self._flatten_single_tokens_for_lm(
-                    hand_token[0], self.lm_shared_num_quantizers
-                )
-                shared_len = min(len_motion, len_hand)
-                motion_tokens.append(flat_motion[:shared_len])
-                hand_tokens.append(flat_hand[:shared_len])
-                lengths_tokens.append(shared_len)
+        for i in range(len(feats_ref)):
+            motion_token, _ = self.vae.encode(feats_ref_body[i:i + 1])
+            flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                motion_token[0], q_use
+            )
+            motion_tokens.append(flat_motion)
+            lengths_tokens.append(len_motion)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
-                                               hand_tokens=hand_tokens,
                                                lengths=lengths_tokens,
                                                task="m2t",
-                                               stage='test')
+                                               stage='test',
+                                               src=batch['src'],
+                                               name=batch['name'])
         # print(outputs, texts)
         # return set
         rs_set = {

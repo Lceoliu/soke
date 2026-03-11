@@ -1,6 +1,7 @@
 from typing import List
 import os
 import torch
+import torch.distributed as dist
 from torch import Tensor
 from torch.distributed import all_reduce, ReduceOp
 from torchmetrics import Metric
@@ -77,6 +78,7 @@ class M2TMetrics(Metric):
 
     @torch.no_grad()
     def compute(self, sanity_flag):
+        use_dist = dist.is_available() and dist.is_initialized()
         # Init metrics dict
         metrics = {metric: getattr(self, metric) for metric in self.metrics}
 
@@ -95,11 +97,13 @@ class M2TMetrics(Metric):
             rouge_score = 0.0
         for k in range(1, self.bleu_k + 1):
             metrics[f"Bleu_{str(k)}"] = torch.tensor(bleu_scores[f'bleu{str(k)}'], device=self.device)
-            all_reduce(metrics[f"Bleu_{str(k)}"], op=ReduceOp.AVG)
+            if use_dist:
+                all_reduce(metrics[f"Bleu_{str(k)}"], op=ReduceOp.AVG)
             print(f"Bleu_{str(k)}: ", metrics[f"Bleu_{str(k)}"])
             
         metrics["ROUGE_L"] = torch.tensor(rouge_score, device=self.device)
-        all_reduce(metrics["ROUGE_L"], op=ReduceOp.AVG)
+        if use_dist:
+            all_reduce(metrics["ROUGE_L"], op=ReduceOp.AVG)
         print('ROUGE_L: ', metrics["ROUGE_L"])
 
         source_bleu1 = []
@@ -115,8 +119,9 @@ class M2TMetrics(Metric):
                 bleu4 = 0.0
             metrics[f"{src_name}_Bleu_1"] = torch.tensor(bleu1, device=self.device)
             metrics[f"{src_name}_Bleu_4"] = torch.tensor(bleu4, device=self.device)
-            all_reduce(metrics[f"{src_name}_Bleu_1"], op=ReduceOp.AVG)
-            all_reduce(metrics[f"{src_name}_Bleu_4"], op=ReduceOp.AVG)
+            if use_dist:
+                all_reduce(metrics[f"{src_name}_Bleu_1"], op=ReduceOp.AVG)
+                all_reduce(metrics[f"{src_name}_Bleu_4"], op=ReduceOp.AVG)
             source_bleu1.append(metrics[f"{src_name}_Bleu_1"])
             source_bleu4.append(metrics[f"{src_name}_Bleu_4"])
             print(f"{src_name}_Bleu_1: ", metrics[f"{src_name}_Bleu_1"])

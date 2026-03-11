@@ -483,7 +483,8 @@ class Mbart_Based_MLM(nn.Module):
                         do_sample: bool = True,
                         bad_words_ids: List[int] = None,
                         src: List[str] = None,
-                        name: List[str] = None):
+                        name: List[str] = None,
+                        return_text_only: bool = False):
 
         # Device
         try:
@@ -553,6 +554,25 @@ class Mbart_Based_MLM(nn.Module):
             self.tokenizer.padding_side = 'left'
         
         outputs_tokens_hand = cleaned_text_hand = outputs_tokens_rhand = cleaned_text_rhand = None
+        if return_text_only:
+            if 'multi' in self.model_type:
+                self.map_ids(outputs['outputs_re'], direction='emb_to_token')
+                cleaned_text = self.tokenizer.batch_decode(outputs['outputs_re'], skip_special_tokens=True)
+            else:
+                if self.lm_type == 'encdec':
+                    decoded = outputs
+                else:
+                    decoded = outputs
+                cleaned_text = self.tokenizer.batch_decode(decoded, skip_special_tokens=True)
+            return {
+                'outputs_tokens': None,
+                'cleaned_text': cleaned_text,
+                'outputs_tokens_hand': None,
+                'cleaned_text_hand': None,
+                'outputs_tokens_rhand': None,
+                'cleaned_text_rhand': None,
+            }
+
         if 'multi' in self.model_type:
             if self.model_type != 'mbart_multi_flatten':
                 # print('ops_re: ', outputs['outputs_re'])
@@ -696,7 +716,9 @@ class Mbart_Based_MLM(nn.Module):
                 max_length=40,
                 num_beams=1,
                 do_sample=False,
-                src=src
+                src=src,
+                name=name,
+                return_text_only=True,
                 # bad_words_ids=self.bad_words_ids
             )
             return gen_results["cleaned_text"]
