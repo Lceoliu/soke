@@ -244,42 +244,95 @@ def smplx_to_vertices_and_joints(root, body, lhand, rhand, jaw, shape, expr, dev
     return vertices, joints
 
 
-def render_one_frame(renderer, vertices, faces, width, height, focal, cam_trans, mesh_rot_deg):
+# import numpy as np
+# import trimesh
+# import pyrender
+
+
+def render_one_frame(
+    renderer, vertices, faces, width=512, height=512, 
+    focal=None, cam_trans=None, mesh_rot_deg=(0, 0, 0), auto_cam=False
+):
+    import trimesh.transformations as tf
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    
+    # --- 1. 旋转模型 ---
     rx, ry, rz = mesh_rot_deg
     if abs(rx) > 1e-8:
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.radians(rx), [1, 0, 0]))
+        mesh.apply_transform(tf.rotation_matrix(np.radians(rx),[1, 0, 0]))
     if abs(ry) > 1e-8:
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.radians(ry), [0, 1, 0]))
+        mesh.apply_transform(tf.rotation_matrix(np.radians(ry), [0, 1, 0]))
     if abs(rz) > 1e-8:
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.radians(rz), [0, 0, 1]))
+        mesh.apply_transform(tf.rotation_matrix(np.radians(rz), [0, 0, 1]))
 
+    # --- 2. 优化材质 (增强细节辨识度) ---
+    # 稍微降低粗糙度、增加一点金属感，打造类似塑料/黏土的质感
+    # 这样手掌弯曲、手指交错时会有明显的高光和阴影过度
     material = pyrender.MetallicRoughnessMaterial(
-        metallicFactor=0.0,
+        metallicFactor=0.1,     # 引入微小金属感，收紧高光
+        roughnessFactor=0.4,    # 降低粗糙度，使其具有漫反射光泽
         alphaMode="OPAQUE",
-        baseColorFactor=(1.0, 1.0, 0.9, 1.0),
+        baseColorFactor=(0.85, 0.85, 0.9, 1.0), # 微微偏冷的灰白色，显高级且不刺眼
     )
-    mesh_node = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False)
+    
+    # 开启 smooth=True，计算平滑法线，避免手部出现块状多边形干扰视觉
+    mesh_node = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=True)
 
-    scene = pyrender.Scene(ambient_light=(0.3, 0.3, 0.3), bg_color=[255, 255, 255, 255])
+    # --- 3. 设置深色背景 ---
+    bg_color = np.array([40, 42, 45], dtype=np.float32) # 深灰黑色
+    scene = pyrender.Scene(
+        ambient_light=(0.15, 0.15, 0.15), 
+        bg_color=list(bg_color) + [255]
+    )
     scene.add(mesh_node, "mesh")
 
+    # --- 4. 自动计算相机参数 (包围盒适配) ---
+    if auto_cam or cam_trans is None or focal is None:
+        min_v = mesh.vertices.min(axis=0)
+        max_v = mesh.vertices.max(axis=0)
+        center = (min_v + max_v) / 2.0
+        max_extent = np.max(max_v - min_v)
+        
+        # 默认焦距设为图像尺寸的较大值（约等于常规镜头）
+        if focal is None:
+            focal = max(width, height)
+            
+        # 根据相似三角形计算相机距离，乘以1.2留出20%的安全边距
+        distance = (max_extent * focal / min(width, height)) * 1.2
+        cam_trans = np.array([center[0], center[1], center[2] + distance])
+
+    # --- 5. 设置相机 ---
     camera_pose = np.eye(4, dtype=np.float32)
     camera_pose[:3, 3] = cam_trans
-    camera_pose[:3, :3] = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    # OpenCV to OpenGL 坐标系转换 (相机看向上方-Y，前方-Z)
+    camera_pose[:3, :3] = np.array([[1, 0, 0],[0, -1, 0], [0, 0, -1]], dtype=np.float32)
     camera = pyrender.camera.IntrinsicsCamera(fx=focal, fy=focal, cx=width / 2.0, cy=height / 2.0)
     scene.add(camera, pose=camera_pose)
 
-    light = pyrender.DirectionalLight(color=[1, 1, 1], intensity=5e2)
-    light_pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]], dtype=np.float32)
-    scene.add(light, pose=light_pose)
+    # --- 6. 三点布光系统 (立体感核心) ---
+    # 主光 (Key Light): 偏暖色，从右上方打向主体，强度最高，塑造主要明暗面
+    key_pose = tf.euler_matrix(-np.pi/4, np.pi/4, 0, 'rxyz')
+    scene.add(pyrender.DirectionalLight(color=[1.0, 0.95, 0.9], intensity=5.0), pose=key_pose)
 
+    # 辅光 (Fill Light): 偏冷色，从左前方打向主体，强度较弱，用来照亮死黑的阴影区域
+    fill_pose = tf.euler_matrix(-np.pi/6, -np.pi/4, 0, 'rxyz')
+    scene.add(pyrender.DirectionalLight(color=[0.7, 0.8, 1.0], intensity=2.0), pose=fill_pose)
+
+    # 轮廓光 (Rim Light): 纯白色，从后方打过来，勾勒人物边缘（尤其是手指边缘），将其与黑背景分离
+    rim_pose = tf.euler_matrix(-np.pi/4, np.pi, 0, 'rxyz')
+    scene.add(pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=4.0), pose=rim_pose)
+
+    # --- 7. 渲染与背景合成 ---
     rgb, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     rgb = rgb[:, :, :3].astype(np.float32)
-    bg = np.ones((height, width, 3), dtype=np.float32) * 255.0
+    
+    # 使用设定好的深色背景矩阵
+    bg_mat = np.ones((height, width, 3), dtype=np.float32) * bg_color
     valid = (depth > 0)[:, :, None]
-    frame = rgb * valid + bg * (1.0 - valid)
-    return np.asarray(frame, dtype=np.uint8)
+    frame = rgb * valid + bg_mat * (1.0 - valid)
+    
+    # 防止溢出并返回
+    return np.clip(frame, 0, 255).astype(np.uint8)
 
 
 def render_mesh_video(vertices_seq, faces, out_mp4, fps, width, height, focal, cam_trans, mesh_rot_deg):
@@ -325,6 +378,9 @@ def save_side_by_side(raw_frames, mesh_frames, out_path, fps):
 def main():
     args = parse_args()
     device_name = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    assert (
+        device_name != "cpu"
+    ), "This script requires CUDA because get_coord uses a CUDA SMPL-X layer in current repo."
     device = torch.device(device_name)
     if device.type != "cuda":
         raise RuntimeError("This script requires CUDA because get_coord uses a CUDA SMPL-X layer in current repo.")

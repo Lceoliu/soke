@@ -295,7 +295,8 @@ class MLM(nn.Module):
                         max_length: int = 256,
                         num_beams: int = 1,
                         do_sample: bool = True,
-                        bad_words_ids: List[int] = None):
+                        bad_words_ids: List[int] = None,
+                        return_text_only: bool = False):
 
         # Device
         try:
@@ -336,6 +337,18 @@ class MLM(nn.Module):
             self.tokenizer.padding_side = 'left'
         
         outputs_tokens_hand = cleaned_text_hand = outputs_tokens_rhand = cleaned_text_rhand = None
+        if return_text_only:
+            if 'multi' in self.model_type:
+                cleaned_text = self.tokenizer.batch_decode(outputs['outputs_re'], skip_special_tokens=True)
+            else:
+                cleaned_text = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            return {'outputs_tokens': None,
+                    'cleaned_text': cleaned_text,
+                    'outputs_tokens_hand': None,
+                    'cleaned_text_hand': None,
+                    'outputs_tokens_rhand': None,
+                    'cleaned_text_rhand': None
+                    }
         if 'multi' in self.model_type:
             # print(outputs['outputs_re'])
             outputs_string = self.tokenizer.batch_decode(outputs['outputs_re'], skip_special_tokens=True)
@@ -470,6 +483,7 @@ class MLM(nn.Module):
                 max_length=40,
                 num_beams=1,
                 do_sample=False,
+                return_text_only=True,
                 # bad_words_ids=self.bad_words_ids
             )
             return gen_results["cleaned_text"]

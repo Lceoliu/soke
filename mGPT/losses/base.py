@@ -23,17 +23,20 @@ class BaseLosses(nn.Module):
         for loss in losses[:-1]:
             self._losses_func[loss] = losses_func[loss](reduction='mean')
             
-    def _update_loss(self, loss: str, outputs, inputs, length=None):
+    def _update_loss(self, loss: str, outputs, inputs, length=None, **kwargs):
         '''Update the loss and return the weighted loss.'''
         # print(loss, inputs.shape, outputs.shape)
         # Update the loss
         if length is not None:
             try:
-                val = self._losses_func[loss](outputs, inputs, length=length)
+                val = self._losses_func[loss](outputs, inputs, length=length, **kwargs)
             except TypeError:
                 val = self._losses_func[loss](outputs, inputs)
         else:
-            val = self._losses_func[loss](outputs, inputs)
+            try:
+                val = self._losses_func[loss](outputs, inputs, **kwargs)
+            except TypeError:
+                val = self._losses_func[loss](outputs, inputs)
         # self.losses_values[loss] += val.detach()
         getattr(self, loss).add_(val.detach())
         # Return a weighted sum
@@ -63,6 +66,9 @@ class BaseLosses(nn.Module):
         if loss == "total":
             log_name = f"{loss}/{split}"
         else:
-            loss_type, name = loss.split("_")
+            if "_" in loss:
+                loss_type, name = loss.split("_", 1)
+            else:
+                loss_type, name = "loss", loss
             log_name = f"{loss_type}/{name}/{split}"
         return log_name

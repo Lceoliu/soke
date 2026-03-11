@@ -114,7 +114,7 @@ class BaseModel(LightningModule):
                     count[n] = count[n] + 1
             for k in scores.keys():
                 scores[k] = scores[k] / max(count[k], 1)
-            print('rank: ', torch.distributed.get_rank(), scores)
+            print('rank: ', self._safe_rank(), scores)
 
         # Log metrics
         dico = self.metrics_log_dict()

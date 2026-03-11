@@ -13,6 +13,12 @@ from typing import Optional
 from .tools.token_emb import NewTokenEmb
 from mGPT.archs.lm_multihead import LMMultiHead
 from mGPT.archs.lm_multihead_part import LMMultiHead_Part
+from mGPT.archs.task_formatting import (
+    SignLanguageTaskFormatter,
+    SPECIAL_TASK_TOKENS,
+    add_missing_special_tokens,
+    serialize_sign_tokens,
+)
 
 
 def get_tokens_as_list(tokenizer, word_list):
@@ -117,6 +123,7 @@ class Mbart_Based_MLM(nn.Module):
         else:
             new_lang_token = ['en_ASL', 'zh_CSL', 'de_DGS']
         self.tokenizer.add_tokens(new_lang_token, special_tokens=True)
+        add_missing_special_tokens(self.tokenizer)
         all_motion_str = [f'<motion_id_{i}>' for i in range(self.m_codebook_size + 3)]
         all_hand_str = [f'<hand_id_{i}>' for i in range(self.hand_codebook_size + 3)] if hand_codebook_size>0 else []
         all_rhand_str = [f'<rhand_id_{i}>' for i in range(self.rhand_codebook_size + 3)] if rhand_codebook_size>0 else []
@@ -127,16 +134,18 @@ class Mbart_Based_MLM(nn.Module):
         with open(os.path.join(model_path, 'map_ids.pkl'), 'rb') as f:
             self.tok_id_to_emb_id = pickle.load(f)
         idx = len(self.tok_id_to_emb_id)
-        for tok in [*new_lang_token, *all_motion_str, *all_hand_str, *all_rhand_str]:
+        for tok in [*new_lang_token, *SPECIAL_TASK_TOKENS, *all_motion_str, *all_hand_str, *all_rhand_str]:
             tok_id = self.tokenizer.convert_tokens_to_ids(tok)
-            self.tok_id_to_emb_id[tok_id] = idx
-            idx += 1
+            if tok_id not in self.tok_id_to_emb_id:
+                self.tok_id_to_emb_id[tok_id] = idx
+                idx += 1
         self.emb_id_to_tok_id = {v:k for k,v in self.tok_id_to_emb_id.items()}
         self.eos_idx = self.tok_id_to_emb_id[self.tokenizer.convert_tokens_to_ids('</s>')]
 
         # restrict output vocab
         tokenizer_with_prefix_space = MBartTokenizer.from_pretrained(model_path, add_prefix_space=True, legacy=True)
         tokenizer_with_prefix_space.add_tokens(new_lang_token, special_tokens=True)
+        add_missing_special_tokens(tokenizer_with_prefix_space)
         tokenizer_with_prefix_space.add_tokens(all_motion_str + all_hand_str + all_rhand_str)
         all_motion_ids = get_tokens_as_list(tokenizer_with_prefix_space, all_motion_str)
         all_hand_ids = get_tokens_as_list(tokenizer_with_prefix_space, all_hand_str)
@@ -192,6 +201,10 @@ class Mbart_Based_MLM(nn.Module):
                 self.name2kws.update(data)
         with open('scripts/word2code.json', 'r') as f:
             self.word2code = json.load(f)
+        self.task_formatter = SignLanguageTaskFormatter(
+            tokenizer=self.tokenizer,
+            map_token_ids=self._map_token_ids_clone,
+        )
 
 
     def map_ids(self, input_ids: torch.Tensor, direction: str ='token_to_emb'):
@@ -209,6 +222,20 @@ class Mbart_Based_MLM(nn.Module):
                     input_ids[i][j] = mapping[input_ids[i][j].item()]
                 except:
                     input_ids[i][j] = unk_idx
+
+    def _map_token_ids_clone(self, input_ids: torch.Tensor, direction: str = 'token_to_emb'):
+        ids = input_ids.clone()
+        self.map_ids(ids, direction=direction)
+        return ids
+
+    def serialize_sign_sequence(self, body_tokens, hand_tokens=None, rhand_tokens=None):
+        return serialize_sign_tokens(body_tokens, hand_tokens, rhand_tokens)
+
+    def build_motion_continuation_batch(self, sign_strings: List[str]):
+        return self.task_formatter.build_motion_continuation(sign_strings)
+
+    def build_m2t_causal_batch(self, sign_strings: List[str], texts: List[str]):
+        return self.task_formatter.build_motion_to_text(sign_strings, texts)
 
 
     def get_kw_strings(self, name, src):
@@ -456,7 +483,8 @@ class Mbart_Based_MLM(nn.Module):
                         do_sample: bool = True,
                         bad_words_ids: List[int] = None,
                         src: List[str] = None,
-                        name: List[str] = None):
+                        name: List[str] = None,
+                        return_text_only: bool = False):
 
         # Device
         try:
@@ -526,6 +554,25 @@ class Mbart_Based_MLM(nn.Module):
             self.tokenizer.padding_side = 'left'
         
         outputs_tokens_hand = cleaned_text_hand = outputs_tokens_rhand = cleaned_text_rhand = None
+        if return_text_only:
+            if 'multi' in self.model_type:
+                self.map_ids(outputs['outputs_re'], direction='emb_to_token')
+                cleaned_text = self.tokenizer.batch_decode(outputs['outputs_re'], skip_special_tokens=True)
+            else:
+                if self.lm_type == 'encdec':
+                    decoded = outputs
+                else:
+                    decoded = outputs
+                cleaned_text = self.tokenizer.batch_decode(decoded, skip_special_tokens=True)
+            return {
+                'outputs_tokens': None,
+                'cleaned_text': cleaned_text,
+                'outputs_tokens_hand': None,
+                'cleaned_text_hand': None,
+                'outputs_tokens_rhand': None,
+                'cleaned_text_rhand': None,
+            }
+
         if 'multi' in self.model_type:
             if self.model_type != 'mbart_multi_flatten':
                 # print('ops_re: ', outputs['outputs_re'])
@@ -669,7 +716,9 @@ class Mbart_Based_MLM(nn.Module):
                 max_length=40,
                 num_beams=1,
                 do_sample=False,
-                src=src
+                src=src,
+                name=name,
+                return_text_only=True,
                 # bad_words_ids=self.bad_words_ids
             )
             return gen_results["cleaned_text"]

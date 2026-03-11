@@ -219,3 +219,37 @@ bash scripts/pipeline/train_vae_finetune_sign_rvq4_ddp.sh
 3. `configs/vae/large_vae_pretrain.yaml` 中 `VAL_EVERY_STEPS` 设置很大，默认近似关闭验证
 4. 若你需要在大语料上开启 MR 指标验证，请保证数据与 `feats2joints` 假设一致（SMPL-X 133）
 5. 自动后处理默认“尽量不打断训练流程”（失败只告警），若希望严格失败请显式设置 `AUTO_POST_STRICT=1`
+
+---
+
+## 8. 2026-03-09 补充：LFQ 主路径与下游 LM 一键流程
+
+当前分支建议优先使用 LFQ 方案：
+
+1. 一阶段预训练：`scripts/pipeline/train_vae_pretrain_lfq4_ddp.sh`
+2. 手语微调（FK/ACC/Contact）：`scripts/pipeline/train_vae_finetune_sign_lfq4_fkhand_body_pretrained_ddp.sh`
+3. 下游 LM 训练 + 自动评估 + 自动可视化：`scripts/pipeline/train_lm_downstream_auto.sh`
+
+典型下游命令：
+
+```bash
+GPU_IDS=0,1,2,3,4,5,6,7 \
+PRETRAINED_VAE=/home/SOKE/experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt \
+EXP_NAME=SOKE_LFQ4_ACC_LM \
+PREPARE_TOKENS=1 \
+AUTO_EVAL_BLEU=1 \
+AUTO_VIS=1 \
+VIS_NUM_SAMPLES=12 \
+VIS_CAM_Y=-0.5 \
+bash scripts/pipeline/train_lm_downstream_auto.sh
+```
+
+脚本自动完成：
+1. motion tokenize（可选）
+2. LM 训练
+3. `m2t` BLEU/ROUGE 评估
+4. `t2m` 测试与抽样 mesh 可视化
+
+输出：
+- 报告：`experiments/mgpt/<EXP_NAME>/auto_reports/downstream/*`
+- 可视化：`experiments/mgpt/<EXP_NAME>/auto_vis/<timestamp>/videos`

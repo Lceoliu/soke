@@ -213,19 +213,39 @@ class SMPLX(object):
 smpl_x = SMPLX()
 # smpl = SMPL()
 
+_SMPLX_LAYER_CACHE = {}
 
 
-def get_coord(root_pose, body_pose, lhand_pose, rhand_pose, jaw_pose, shape, expr, remove_lower=True):
+def _get_smplx_layer(device, dtype=torch.float32):
+    key = (str(device), str(dtype))
+    layer = _SMPLX_LAYER_CACHE.get(key, None)
+    if layer is None:
+        layer = copy.deepcopy(smpl_x.layer['neutral']).to(device=device, dtype=dtype)
+        _SMPLX_LAYER_CACHE[key] = layer
+    return layer
+
+
+def get_coord(root_pose, body_pose, lhand_pose, rhand_pose, jaw_pose, shape, expr, remove_lower=True, return_verts=True):
     batch_size = root_pose.shape[0]
-    zero_pose = torch.zeros((1, 3)).float().to(body_pose).repeat(batch_size, 1)  # eye poses
-
-    smplx_layer = copy.deepcopy(smpl_x.layer['neutral']).cuda()
-    output = smplx_layer(betas=shape, body_pose=body_pose, global_orient=root_pose, right_hand_pose=rhand_pose,
-                                left_hand_pose=lhand_pose, jaw_pose=jaw_pose, leye_pose=zero_pose,
-                                reye_pose=zero_pose, expression=expr)
+    device = body_pose.device
+    smplx_dtype = torch.float32
+    zero_pose = torch.zeros((batch_size, 3), device=device, dtype=smplx_dtype)  # eye poses
+    smplx_layer = _get_smplx_layer(device=device, dtype=smplx_dtype)
+    output = smplx_layer(
+        betas=shape.to(dtype=smplx_dtype),
+        body_pose=body_pose.to(dtype=smplx_dtype),
+        global_orient=root_pose.to(dtype=smplx_dtype),
+        right_hand_pose=rhand_pose.to(dtype=smplx_dtype),
+        left_hand_pose=lhand_pose.to(dtype=smplx_dtype),
+        jaw_pose=jaw_pose.to(dtype=smplx_dtype),
+        leye_pose=zero_pose,
+        reye_pose=zero_pose,
+        expression=expr.to(dtype=smplx_dtype),
+        return_verts=return_verts,
+    )
     # camera-centered 3D coordinate
-    vertices = output.vertices
-    joints = output.joints
+    vertices = output.vertices.to(dtype=body_pose.dtype) if return_verts else None
+    joints = output.joints.to(dtype=body_pose.dtype)
 
     # if remove_lower:
 

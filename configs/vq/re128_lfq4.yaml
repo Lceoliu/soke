@@ -1,0 +1,23 @@
+target: mGPT.archs.mgpt_vq.VQVae
+params:
+  quantizer: 'lfq'
+  num_quantizers: 4
+  code_num: 128
+  code_dim: 512
+  use_contact: true
+  num_contact_classes: 3
+  lfq_ste_temperature: 1.0
+  lfq_ste_temperature_end: 0.1
+  lfq_entropy_loss_weight: 0.1
+  lfq_entropy_global_weight: 1.0
+  lfq_entropy_local_weight: 1.0
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  norm: None
+  activation: 'relu'
+  nfeats: 43
+  ablation: ${ABLATION}

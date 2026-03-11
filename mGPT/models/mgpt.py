@@ -11,6 +11,7 @@ from mGPT.models.base import BaseModel
 from .base import BaseModel
 import json
 import mGPT.render.matplot.plot_3d_global as plot_3d
+from mGPT.utils.human_models import get_coord, smpl_x
 
 
 class MotionGPT(BaseModel):
@@ -57,13 +58,27 @@ class MotionGPT(BaseModel):
         if self.face_vae_cfg is not None:
             self.face_vae = instantiate_from_config(self.face_vae_cfg)
 
+        self.lm_body_num_quantizers = int(getattr(self.vae, "num_quantizers", 1))
+        self.lm_hand_num_quantizers = int(
+            getattr(getattr(self, "hand_vae", None), "num_quantizers", self.lm_body_num_quantizers)
+        )
+        self.lm_rhand_num_quantizers = int(
+            getattr(getattr(self, "rhand_vae", None), "num_quantizers", self.lm_body_num_quantizers)
+        )
+        q_candidates = [self.lm_body_num_quantizers]
+        self.lm_num_token_parts = 1
+        if self.hand_vae_cfg is not None:
+            q_candidates.append(self.lm_hand_num_quantizers)
+            self.lm_num_token_parts += 1
+        if self.rhand_vae_cfg is not None:
+            q_candidates.append(self.lm_rhand_num_quantizers)
+            self.lm_num_token_parts += 1
+        # For multi-head LM text formatting, all parts must share one temporal token length.
+        # We use the minimum quantizer level count to avoid invalid shape coupling when parts differ.
+        self.lm_shared_num_quantizers = int(min(q_candidates))
+
         # Freeze the motion tokenizer for lm training
         if 'lm' in self.hparams.stage:
-            if getattr(self.vae, "num_quantizers", 1) > 1:
-                raise NotImplementedError(
-                    "RVQ multi-level tokens are not yet wired into LM training/inference. "
-                    "Use STAGE=vae for RVQ, or switch quantizer to single-level for LM stages."
-                )
             self.vae.training = False
             for p in self.vae.parameters():
                 p.requires_grad = False
@@ -86,10 +101,88 @@ class MotionGPT(BaseModel):
 
         # Data transform
         self.feats2joints = datamodule.feats2joints
+        self.lambda_fk_hand = float(cfg.LOSS.get("LAMBDA_FK_HAND", 0.0))
+        self.lambda_accel_hand = float(cfg.LOSS.get("LAMBDA_ACCEL_HAND", 0.0))
+        self.lambda_accel_wrist_rel = float(cfg.LOSS.get("LAMBDA_ACCEL_WRIST_REL", 0.0))
+        self.lambda_contact = float(cfg.LOSS.get("LAMBDA_CONTACT", 0.0))
+        self._use_hand_fk_supervision = (
+            self.lambda_fk_hand > 0.0
+            or self.lambda_accel_hand > 0.0
+            or self.lambda_accel_wrist_rel > 0.0
+        )
+        self._use_contact_supervision = self.lambda_contact > 0.0
+        self.register_buffer(
+            "_smplx_shape_template",
+            torch.tensor(
+                [[[-0.07284723, 0.1795129, -0.27608207, 0.135155, 0.10748172,
+                   0.16037364, -0.01616933, -0.03450319, 0.01369138, 0.01108842]]],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_smplx_lhand_idx",
+            torch.tensor(list(smpl_x.joint_part2idx["lhand"]), dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_smplx_rhand_idx",
+            torch.tensor(list(smpl_x.joint_part2idx["rhand"]), dtype=torch.long),
+            persistent=False,
+        )
 
         # Count codebook frequency
         self.codePred = []
         self.codeFrequency = torch.zeros((self.hparams.codebook_size, ))
+
+    def _denormalize_motion(self, features: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(self.datamodule.hparams.mean, device=features.device, dtype=features.dtype)
+        std = torch.as_tensor(self.datamodule.hparams.std, device=features.device, dtype=features.dtype)
+        return features * std + mean
+
+    def _compute_hand_fk_joints(self, features_norm: torch.Tensor):
+        if features_norm.shape[-1] != 133:
+            return None, None, None, None
+
+        # FK path used by hand loss:
+        # 1) Denormalize 133-dim training features back to SMPL-X pose space.
+        # 2) Rebuild a full 169-dim SMPL-X parameter vector by prepending 36 zeros
+        #    (keeps the same convention as datamodule.feats2joints).
+        # 3) Run SMPL-X forward (get_coord) to obtain joints in camera-centered
+        #    global coordinates.
+        #
+        # Origin / frame:
+        # - Use wrist-relative hand coordinates for loss supervision:
+        #   left_hand_rel = left_hand_joints - left_wrist,
+        #   right_hand_rel = right_hand_joints - right_wrist.
+        # - This removes global translation drift and focuses loss on hand articulation.
+        #
+        # Hand joint selection:
+        # - Use smpl_x.joint_part2idx["lhand"/"rhand"] indices to avoid hard-coded ids.
+        features = self._denormalize_motion(features_norm)
+        bsz, tlen = features.shape[:2]
+        zero_pose = torch.zeros((bsz, tlen, 36), device=features.device, dtype=features.dtype)
+        shape_param = self._smplx_shape_template.to(features).repeat(bsz, tlen, 1).view(bsz * tlen, -1)
+        features = torch.cat([zero_pose, features], dim=-1).view(bsz * tlen, -1)
+
+        _, joints = get_coord(
+            root_pose=features[..., 0:3],
+            body_pose=features[..., 3:66],
+            lhand_pose=features[..., 66:111],
+            rhand_pose=features[..., 111:156],
+            jaw_pose=features[..., 156:159],
+            shape=shape_param,
+            expr=features[..., 159:169],
+            return_verts=False,
+        )
+        joints = joints.view(bsz, tlen, joints.shape[1], 3)
+        joints_lhand = joints.index_select(2, self._smplx_lhand_idx.to(joints.device))
+        joints_rhand = joints.index_select(2, self._smplx_rhand_idx.to(joints.device))
+        l_wrist = joints[:, :, smpl_x.J_regressor_idx["lwrist"]:smpl_x.J_regressor_idx["lwrist"] + 1, :]
+        r_wrist = joints[:, :, smpl_x.J_regressor_idx["rwrist"]:smpl_x.J_regressor_idx["rwrist"] + 1, :]
+        joints_lhand = joints_lhand - l_wrist
+        joints_rhand = joints_rhand - r_wrist
+        return joints_lhand, joints_rhand, l_wrist, r_wrist
 
     def forward(self, batch, task="t2m"):
         texts = batch["text"]
@@ -155,6 +248,7 @@ class MotionGPT(BaseModel):
         lengths = batch["length"]
         tasks = batch["tasks"]
         all_captions = batch['all_captions']
+        tokens_ref, lengths = self._flatten_batch_tokens_for_lm(tokens_ref, lengths)
         if self.hparams.condition == 'caption':
             texts = [random.choice(all_captions[i]) for i in range(len(texts))]
 
@@ -162,6 +256,105 @@ class MotionGPT(BaseModel):
         outputs = self.lm(texts, tokens_ref, lengths, tasks, src=batch['src'], name=batch['name'])
         # outputs = self.t2m_gpt.generate(texts)
         return {'outputs': outputs}
+
+    def _set_lfq_temperature_progress(self, progress: float):
+        for name in ["vae", "hand_vae", "rhand_vae", "face_vae"]:
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            quantizer = getattr(module, "quantizer", None)
+            if quantizer is None:
+                continue
+            if hasattr(quantizer, "set_anneal_progress"):
+                quantizer.set_anneal_progress(progress)
+
+    @staticmethod
+    def _resize_contact_logits(logits: torch.Tensor, target_t: int) -> torch.Tensor:
+        if logits is None or logits.shape[-1] == target_t:
+            return logits
+        return F.interpolate(logits, size=target_t, mode='linear', align_corners=False)
+
+    def _merge_contact_logits(self, aux_list, target_t: int):
+        logits_list = []
+        for aux in aux_list:
+            if not isinstance(aux, dict):
+                continue
+            logits = aux.get("contact_logits", None)
+            if logits is None:
+                continue
+            logits = self._resize_contact_logits(logits, target_t)
+            logits_list.append(logits)
+        if len(logits_list) == 0:
+            return None
+        if len(logits_list) == 1:
+            merged = logits_list[0]
+        else:
+            merged = torch.stack(logits_list, dim=0).mean(dim=0)
+        # [B, C=3, T] -> [B, T, C]
+        return merged.permute(0, 2, 1).contiguous()
+
+    def _flatten_batch_tokens_for_lm(self, tokens: torch.Tensor, lengths):
+        if tokens is None:
+            return tokens, lengths
+        if not torch.is_tensor(tokens):
+            return tokens, lengths
+
+        # [B, T, Q, 3] -> [B, T*Q, 3]
+        if tokens.dim() == 4:
+            q_use = min(int(tokens.shape[2]), int(self.lm_shared_num_quantizers))
+            if q_use > 0 and int(tokens.shape[2]) != q_use:
+                tokens = tokens[:, :, :q_use, :]
+            bsz, tlen, _, pnum = tokens.shape
+            tokens = tokens.reshape(bsz, tlen * q_use, pnum)
+            lengths = [int(l) * q_use for l in lengths]
+            return tokens, lengths
+
+        # [B, T, Q] (single stream multi-level) -> [B, T*Q]
+        if tokens.dim() == 3:
+            is_multihead_flat = (
+                int(self.lm_num_token_parts) > 1
+                and int(tokens.shape[-1]) == int(self.lm_num_token_parts)
+            )
+            if is_multihead_flat:
+                return tokens, lengths
+            q_use = min(int(tokens.shape[-1]), int(self.lm_body_num_quantizers))
+            if q_use > 0 and int(tokens.shape[-1]) != q_use:
+                tokens = tokens[:, :, :q_use]
+            bsz, tlen, _ = tokens.shape
+            tokens = tokens.reshape(bsz, tlen * q_use)
+            lengths = [int(l) * q_use for l in lengths]
+            return tokens, lengths
+
+        return tokens, lengths
+
+    @staticmethod
+    def _flatten_single_tokens_for_lm(tokens: torch.Tensor, q_use: int):
+        if tokens.dim() == 1:
+            return tokens, int(tokens.shape[0])
+        if tokens.dim() == 2:
+            q_keep = min(int(tokens.shape[-1]), int(max(q_use, 1)))
+            tokens = tokens[:, :q_keep].reshape(-1)
+            return tokens, int(tokens.shape[0])
+        return tokens.reshape(-1), int(tokens.numel())
+
+    @staticmethod
+    def _unflatten_single_tokens_from_lm(tokens: torch.Tensor, q_use: int):
+        if tokens.dim() != 1:
+            tokens = tokens.reshape(-1)
+        q_use = int(max(q_use, 1))
+        if q_use == 1:
+            return tokens
+        valid = (int(tokens.shape[0]) // q_use) * q_use
+        if valid <= 0:
+            return tokens[:1]
+        return tokens[:valid].view(-1, q_use)
+
+    def on_train_epoch_start(self):
+        if str(self.hparams.stage) != "vae":
+            return
+        total_epochs = max(int(self.hparams.cfg.TRAIN.END_EPOCH), 1)
+        progress = float(self.current_epoch) / float(max(total_epochs - 1, 1))
+        self._set_lfq_temperature_progress(progress)
 
     @torch.no_grad()
     def val_t2m_forward(self, batch, vis=False):
@@ -208,6 +401,21 @@ class MotionGPT(BaseModel):
         outputs_tokens = gen_results['outputs_tokens']
         outputs_tokens_hand = gen_results['outputs_tokens_hand']
         outputs_tokens_rhand = gen_results['outputs_tokens_rhand']
+
+        q_body_use = self.lm_body_num_quantizers
+        q_hand_use = self.lm_hand_num_quantizers
+        q_rhand_use = self.lm_rhand_num_quantizers
+        if outputs_tokens_hand is not None or outputs_tokens_rhand is not None:
+            q_body_use = q_hand_use = q_rhand_use = self.lm_shared_num_quantizers
+
+        for i in range(len(outputs_tokens)):
+            outputs_tokens[i] = self._unflatten_single_tokens_from_lm(outputs_tokens[i], q_body_use)
+        if outputs_tokens_hand is not None:
+            for i in range(len(outputs_tokens_hand)):
+                outputs_tokens_hand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_hand[i], q_hand_use)
+        if outputs_tokens_rhand is not None:
+            for i in range(len(outputs_tokens_rhand)):
+                outputs_tokens_rhand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_rhand[i], q_rhand_use)
 
         max_len = max(map(len, outputs_tokens))
         if outputs_tokens_hand is not None:
@@ -312,31 +520,38 @@ class MotionGPT(BaseModel):
         all_captions = [c[0] for c in batch['all_captions']]
 
         # Motion Encode
+        #
+        # Current LM m2t generation path only consumes the serialized body/remainder
+        # motion stream as encoder input. Hand/rhand token prompts are not used in
+        # generate_conditional(task="m2t"), so we should not try to encode them here.
+        #
+        # When hand/rhand tokenizers exist, keep the body stream on the same shared-Q
+        # budget as LM training for length consistency, but avoid feeding 45-dim hand
+        # VAEs with concatenated 90-dim left+right features.
         motion_tokens = []
-        hand_tokens = []
         lengths_tokens = []
-        feats_ref_hand = feats_ref[..., 30:120]
-        feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
+        if self.hand_vae_cfg is None and self.rhand_vae_cfg is None:
+            feats_ref_body = feats_ref
+            q_use = self.lm_body_num_quantizers
+        else:
+            feats_ref_body = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
+            q_use = self.lm_shared_num_quantizers
+
         for i in range(len(feats_ref)):
-            if self.hand_vae_cfg is None:
-                motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
-                motion_tokens.append(motion_token[0])
-                lengths_tokens.append(motion_token.shape[1])
-
-            else:
-                motion_token, _ = self.vae.encode(feats_ref_re[i:i+1])
-                motion_tokens.append(motion_token[0])
-                lengths_tokens.append(motion_token.shape[1])
-
-                hand_token, _ = self.hand_vae.encode(feats_ref_hand[i:i+1])
-                hand_tokens.append(hand_token[0])
+            motion_token, _ = self.vae.encode(feats_ref_body[i:i + 1])
+            flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                motion_token[0], q_use
+            )
+            motion_tokens.append(flat_motion)
+            lengths_tokens.append(len_motion)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
-                                               hand_tokens=hand_tokens,
                                                lengths=lengths_tokens,
                                                task="m2t",
-                                               stage='test')
+                                               stage='test',
+                                               src=batch['src'],
+                                               name=batch['name'])
         # print(outputs, texts)
         # return set
         rs_set = {
@@ -359,11 +574,15 @@ class MotionGPT(BaseModel):
         lengths_tokens = []
         for i in range(len(feats_ref)):
             motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
-            motion_tokens.append(motion_token[0])
+            flat_motion, len_motion = self._flatten_single_tokens_for_lm(
+                motion_token[0], self.lm_body_num_quantizers
+            )
+            motion_tokens.append(flat_motion)
+            lengths_tokens.append(len_motion)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
-                                               lengths=lengths,
+                                               lengths=lengths_tokens,
                                                task=task,
                                                stage='test')
 
@@ -376,6 +595,9 @@ class MotionGPT(BaseModel):
                                      0,
                                      self.hparams.codebook_size - 1,
                                      out=None)
+            outputs[i] = self._unflatten_single_tokens_from_lm(
+                outputs[i], self.lm_body_num_quantizers
+            )
 
             if len(outputs[i]) > 1:
                 motion = self.vae.decode(outputs[i])
@@ -412,40 +634,81 @@ class MotionGPT(BaseModel):
         feats_ref = batch["motion"]
         joints_ref = None #self.feats2joints(feats_ref)
         feats_rst_hand = feats_rst_re = loss_commit_hand = loss_commit_re = perplexity_re = perplexity_hand = None
+        fk_lhand_rst = fk_rhand_rst = fk_lhand_ref = fk_rhand_ref = None
+        wrist_l_rst = wrist_r_rst = wrist_l_ref = wrist_r_ref = None
+        gt_contact_labels = batch.get("gt_contact_labels", None)
+        gt_contact_has_label = batch.get("gt_contact_has_label", None)
+        need_contact_aux = self._use_contact_supervision and (gt_contact_labels is not None)
+        contact_aux_list = []
+        contact_logits = None
+
+        def _vae_forward(module, x):
+            if need_contact_aux:
+                x_rst, x_commit, x_perplex, x_aux = module(x, return_aux=True)
+                return x_rst, x_commit, x_perplex, x_aux
+            x_rst, x_commit, x_perplex = module(x)
+            return x_rst, x_commit, x_perplex, None
+
         # motion encode & decode
         if self.hand_vae_cfg is None:
-            feats_rst, loss_commit, perplexity = self.vae(feats_ref)
+            feats_rst, loss_commit, perplexity, aux = _vae_forward(self.vae, feats_ref)
+            contact_aux_list.append(aux)
         elif self.rhand_vae_cfg is None:
             feats_ref_hand = feats_ref[..., 30:120]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-            feats_rst_hand, loss_commit_hand, perplexity_hand = self.hand_vae(feats_ref_hand)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_hand, loss_commit_hand, perplexity_hand, aux_hand = _vae_forward(self.hand_vae, feats_ref_hand)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_hand, feats_rst_re[..., 30:]], dim=-1)
             loss_commit = loss_commit_hand + loss_commit_re
             perplexity = perplexity_hand + perplexity_re
+            contact_aux_list.extend([aux_hand, aux_re])
         elif self.face_vae_cfg is None:
             feats_ref_lhand = feats_ref[..., 30:75]
             feats_ref_rhand = feats_ref[..., 75:120]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-            feats_rst_lhand, loss_commit_lhand, perplexity_lhand = self.hand_vae(feats_ref_lhand)
-            feats_rst_rhand, loss_commit_rhand, perplexity_rhand = self.rhand_vae(feats_ref_rhand)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_lhand, loss_commit_lhand, perplexity_lhand, aux_lhand = _vae_forward(self.hand_vae, feats_ref_lhand)
+            feats_rst_rhand, loss_commit_rhand, perplexity_rhand, aux_rhand = _vae_forward(self.rhand_vae, feats_ref_rhand)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_lhand, feats_rst_rhand, feats_rst_re[..., 30:]], dim=-1)
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re
+            contact_aux_list.extend([aux_lhand, aux_rhand, aux_re])
         else:
             feats_ref_lhand = feats_ref[..., 30:75]
             feats_ref_rhand = feats_ref[..., 75:120]
             feats_ref_face = feats_ref[..., 123:]
             feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:123]], dim=-1)
-            feats_rst_lhand, loss_commit_lhand, perplexity_lhand = self.hand_vae(feats_ref_lhand)
-            feats_rst_rhand, loss_commit_rhand, perplexity_rhand = self.rhand_vae(feats_ref_rhand)
-            feats_rst_face, loss_commit_face, perplexity_face = self.face_vae(feats_ref_face)
-            feats_rst_re, loss_commit_re, perplexity_re = self.vae(feats_ref_re)
+            feats_rst_lhand, loss_commit_lhand, perplexity_lhand, aux_lhand = _vae_forward(self.hand_vae, feats_ref_lhand)
+            feats_rst_rhand, loss_commit_rhand, perplexity_rhand, aux_rhand = _vae_forward(self.rhand_vae, feats_ref_rhand)
+            feats_rst_face, loss_commit_face, perplexity_face, aux_face = _vae_forward(self.face_vae, feats_ref_face)
+            feats_rst_re, loss_commit_re, perplexity_re, aux_re = _vae_forward(self.vae, feats_ref_re)
             feats_rst = torch.cat([feats_rst_re[..., :30], feats_rst_lhand, feats_rst_rhand, feats_rst_re[..., 30:], feats_rst_face], dim=-1)
             loss_commit = loss_commit_lhand + loss_commit_rhand + loss_commit_re + loss_commit_face
             perplexity = perplexity_lhand + perplexity_rhand + perplexity_re + perplexity_face
-            
+            contact_aux_list.extend([aux_lhand, aux_rhand, aux_face, aux_re])
+
+        if need_contact_aux:
+            contact_logits = self._merge_contact_logits(contact_aux_list, target_t=feats_ref.shape[1])
+
+        if self._use_hand_fk_supervision and feats_ref.shape[-1] == 133:
+            # Compute FK joints in one batched SMPL-X pass for both prediction/reference
+            # to reduce overhead and guarantee identical FK pipeline.
+            feats_both = torch.cat([feats_rst, feats_ref.detach()], dim=0)
+            joints_lhand_both, joints_rhand_both, joints_lwrist_both, joints_rwrist_both = self._compute_hand_fk_joints(feats_both)
+            if (
+                joints_lhand_both is not None and joints_rhand_both is not None
+                and joints_lwrist_both is not None and joints_rwrist_both is not None
+            ):
+                bsz = feats_ref.shape[0]
+                fk_lhand_rst = joints_lhand_both[:bsz]
+                fk_rhand_rst = joints_rhand_both[:bsz]
+                fk_lhand_ref = joints_lhand_both[bsz:].detach()
+                fk_rhand_ref = joints_rhand_both[bsz:].detach()
+                wrist_l_rst = joints_lwrist_both[:bsz]
+                wrist_r_rst = joints_rwrist_both[:bsz]
+                wrist_l_ref = joints_lwrist_both[bsz:].detach()
+                wrist_r_ref = joints_rwrist_both[bsz:].detach()
+
         joints_rst = None #self.feats2joints(feats_rst)
         # return set
         rs_set = {
@@ -455,7 +718,18 @@ class MotionGPT(BaseModel):
             "joints_rst": joints_rst,
             "loss_commit": loss_commit,
             "perplexity": perplexity,
-            "length": batch['length']
+            "length": batch['length'],
+            "fk_lhand_rst": fk_lhand_rst,
+            "fk_rhand_rst": fk_rhand_rst,
+            "fk_lhand_ref": fk_lhand_ref,
+            "fk_rhand_ref": fk_rhand_ref,
+            "wrist_l_rst": wrist_l_rst,
+            "wrist_r_rst": wrist_r_rst,
+            "wrist_l_ref": wrist_l_ref,
+            "wrist_r_ref": wrist_r_ref,
+            "contact_logits": contact_logits,
+            "gt_contact_labels": gt_contact_labels,
+            "gt_contact_has_label": gt_contact_has_label,
         }
         return rs_set
 
@@ -606,6 +880,14 @@ class MotionGPT(BaseModel):
                             src=src,
                             name=name
                         )
+                    if "M2TMetrics" in self.hparams.metrics_dict:
+                        rs_set_m2t = self.val_m2t_forward(batch)
+                        getattr(self.metrics, 'M2TMetrics').update(
+                            pred_texts=rs_set_m2t["t_pred"],
+                            gt_texts=rs_set_m2t["t_ref"],
+                            lengths=rs_set_m2t['length'],
+                            src=src,
+                        )
                 elif self.hparams.task == "m2t":
                     rs_set_m2t = self.val_m2t_forward(batch)
                     getattr(self.metrics, 'M2TMetrics').update(
@@ -681,6 +963,18 @@ class MotionGPT(BaseModel):
             elif "lm" in self.hparams.stage:
                 # return rs_set["joints_rst"], rs_set["joints_ref"], rs_set["vertices_rst"], rs_set["vertices_ref"], rs_set["m_ref"], rs_set["m_rst"], \
                 # rs_set_m2t["t_pred"], rs_set_m2t["t_ref"], batch["length"]
+                if self.hparams.task == "m2t":
+                    # `test_step` expects motion-like tensors for optional dumping.
+                    # For m2t evaluation, generated text is already consumed by metrics,
+                    # so we return references as placeholders to keep the interface stable.
+                    return {
+                        'name': name,
+                        'feats_ref': rs_set_m2t["m_ref"],
+                        'feats_rst': rs_set_m2t["m_ref"],
+                        'lengths': batch['length'],
+                        'lengths_rst': batch['length'],
+                        'text': batch_text,
+                    }
                 return {'name': name, 'feats_ref': rs_set["m_ref"], 'feats_rst': rs_set['m_rst'], 'lengths': batch['length'], 'lengths_rst': rs_set['lengths_rst'], 'text': batch_text}
                
         return loss

@@ -58,6 +58,8 @@ class Text2MotionDatasetCB(data.Dataset):
         # Data path
         split = 'train'
         self.code_path = code_path
+        self.lm_token_num_quantizers = int(kwargs.get("lm_token_num_quantizers", 1))
+        self.lm_token_num_parts = int(kwargs.get("lm_token_num_parts", 1))
         
         if task_path:
             instructions = task_path
@@ -144,6 +146,25 @@ class Text2MotionDatasetCB(data.Dataset):
     def __len__(self):
         return len(self.all_data) * len(self.tasks)
 
+    def _flatten_motion_tokens(self, m_tokens):
+        tokens = np.asarray(m_tokens)
+        if tokens.ndim == 3:
+            # [T, Q, P] -> [T*Q, P]
+            t, q, p = tokens.shape
+            return tokens.reshape(t * q, p), int(q)
+        if tokens.ndim == 2:
+            # Already flattened multi-head representation: [T', P]
+            # where P equals number of active token streams (body/hand/rhand).
+            if self.lm_token_num_parts > 1 and int(tokens.shape[1]) == int(self.lm_token_num_parts):
+                q_hint = max(int(self.lm_token_num_quantizers), 1)
+                return tokens, q_hint
+            # Single-stream multi-level code: [T, Q] -> [T*Q]
+            t, q = tokens.shape
+            return tokens.reshape(t * q), int(q)
+        # Already flattened representation keeps [T'].
+        q_hint = max(int(self.lm_token_num_quantizers), 1)
+        return tokens, q_hint
+
 
     def __getitem__(self, idx):
         data_idx = idx % len(self.all_data)
@@ -160,28 +181,35 @@ class Text2MotionDatasetCB(data.Dataset):
         elif src == 'phoenix':
             _, caption, name, m_tokens = load_phoenix_sample(sample, self.phoenix_root, need_pose=False, code_path=os.path.join(self.data_root, self.code_path), need_code=True)
 
+        m_tokens, q_factor = self._flatten_motion_tokens(m_tokens)
         all_captions = [caption]
         # print(m_tokens.shape)
         m_length = m_tokens.shape[0]
-        if m_length < self.min_motion_length:
-            idx = np.linspace(0, m_length-1, num=self.min_motion_length, dtype=int)
+        min_motion_len = self.min_motion_length * q_factor
+        max_motion_len = self.max_motion_length * q_factor
+        if m_length < min_motion_len:
+            idx = np.linspace(0, m_length-1, num=min_motion_len, dtype=int)
             m_tokens = m_tokens[idx]
-        elif m_length > self.max_motion_length:
-            idx = np.linspace(0, m_length-1, num=self.max_motion_length, dtype=int)
+        elif m_length > max_motion_len:
+            idx = np.linspace(0, m_length-1, num=max_motion_len, dtype=int)
             m_tokens = m_tokens[idx]
         else:
-            m_length = (m_length // self.unit_length) * self.unit_length
+            crop_unit = int(np.lcm(int(self.unit_length), int(max(q_factor, 1))))
+            m_length = (m_length // crop_unit) * crop_unit
             idx = (m_tokens.shape[0] - m_length) // 2
             m_tokens = m_tokens[idx:idx + m_length]
 
         coin = np.random.choice([False, False, True])
         if coin:
-            # drop one token at the head or tail
+            # Drop one frame-worth token group at head/tail to keep level alignment.
+            drop_count = int(max(q_factor, 1))
+            if m_tokens.shape[0] <= drop_count:
+                drop_count = 1
             coin2 = np.random.choice([True, False])
             if coin2:
-                m_tokens = m_tokens[:-1]
+                m_tokens = m_tokens[:-drop_count]
             else:
-                m_tokens = m_tokens[1:]
+                m_tokens = m_tokens[drop_count:]
         m_length = m_tokens.shape[0]
 
         tasks = self.tasks[task_idx]
