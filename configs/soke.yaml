@@ -1,24 +1,25 @@
-NAME: SOKE # Experiment names
+NAME: SOKE_QWEN # Experiment names
 USE_RAW_VIDEO: false  # 可视化时是否读取原始 RGB 视频（vis_mesh 使用）
+PRECISION: bf16-mixed
 ACCELERATOR: 'gpu' # Devices optioncal: “cpu”, “gpu”, “tpu”, “ipu”, “hpu”, “mps, “auto”
 NUM_NODES: 1 # Number of GPU nodes for distributed training
-DEVICE: [0,1,2,3,4,5] # Index of gpus eg. [0] or [0,1,2,3] (from CUDA_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7)
+DEVICE: [0,1,2,3,4,5,6,7] # Index of gpus eg. [0] or [0,1,2,3] (from CUDA_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7)
 
 TRAIN:
   #---------------------------------
   STAGE: lm_pretrain # stage "vae" , "lm_pretrain", "lm_instruct"
   #---------------------------------
   NUM_WORKERS: 16 # Number of workers
-  BATCH_SIZE: 32 # Size of batches
+  BATCH_SIZE: 4 # Size of batches
   END_EPOCH: 150 # End epoch
-  RESUME: 'experiments/mgpt/SOKE' # Resume training from this path (empty for starting fresh)
+  RESUME: '' # Resume training from this path (empty for starting fresh)
   PRETRAINED: '' # Preatrained model path
-  PRETRAINED_VAE: 'experiments/mgpt/vae/checkpoints/tokenizer.ckpt' # Vae model path
+  PRETRAINED_VAE: 'experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt' # Vae model path
 
   OPTIM:
     target: AdamW
     params:
-      lr: 2e-4
+      lr: 1e-4
       betas: [0.9, 0.99]
       weight_decay: 0.0
   
@@ -74,10 +75,10 @@ model:
   params:
     condition: 'text'
     task: 't2m'
-    lm: ${lm.mbart_h2s_csl_phoenix}
-    motion_vae: ${vq.re96}
-    hand_vae_cfg: ${vq.hand192}
-    rhand_vae_cfg: ${vq.hand192}
+    lm: ${lm.qwen2_5_3b}
+    motion_vae: ${vq.re128_lfq4}
+    hand_vae_cfg: ${vq.hand256_lfq5}
+    rhand_vae_cfg: ${vq.hand256_lfq5}
 
 LOGGER:
   TYPE: ['wandb']

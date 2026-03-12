@@ -349,6 +349,45 @@ class MotionGPT(BaseModel):
             return tokens[:1]
         return tokens[:valid].view(-1, q_use)
 
+    def _encode_sign_tokens_from_motion(self, feats_ref: torch.Tensor):
+        if self.hand_vae_cfg is None and self.rhand_vae_cfg is None:
+            motion_token, _ = self.vae.encode(feats_ref)
+            flat_motion, _ = self._flatten_single_tokens_for_lm(
+                motion_token[0], self.lm_body_num_quantizers
+            )
+            return flat_motion
+
+        if self.hand_vae_cfg is not None and self.rhand_vae_cfg is not None:
+            feats_ref_lhand = feats_ref[..., 30:75]
+            feats_ref_rhand = feats_ref[..., 75:120]
+            feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
+            token_body, _ = self.vae.encode(feats_ref_re)
+            token_lhand, _ = self.hand_vae.encode(feats_ref_lhand)
+            token_rhand, _ = self.rhand_vae.encode(feats_ref_rhand)
+            q_use = int(self.lm_shared_num_quantizers)
+            flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use)
+            flat_lhand, _ = self._flatten_single_tokens_for_lm(token_lhand[0], q_use)
+            flat_rhand, _ = self._flatten_single_tokens_for_lm(token_rhand[0], q_use)
+            min_len = min(flat_body.shape[0], flat_lhand.shape[0], flat_rhand.shape[0])
+            return torch.stack(
+                [
+                    flat_body[:min_len],
+                    flat_lhand[:min_len],
+                    flat_rhand[:min_len],
+                ],
+                dim=-1,
+            )
+
+        feats_ref_hand = feats_ref[..., 30:120]
+        feats_ref_re = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
+        token_body, _ = self.vae.encode(feats_ref_re)
+        token_hand, _ = self.hand_vae.encode(feats_ref_hand)
+        q_use = int(self.lm_shared_num_quantizers)
+        flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use)
+        flat_hand, _ = self._flatten_single_tokens_for_lm(token_hand[0], q_use)
+        min_len = min(flat_body.shape[0], flat_hand.shape[0])
+        return torch.stack([flat_body[:min_len], flat_hand[:min_len]], dim=-1)
+
     def on_train_epoch_start(self):
         if str(self.hparams.stage) != "vae":
             return
@@ -512,42 +551,15 @@ class MotionGPT(BaseModel):
 
     @torch.no_grad()
     def val_m2t_forward(self, batch):
-        # self.hparams.metrics_dict = []
-
         feats_ref = batch["motion"]
         texts = batch["text"]
         lengths = batch["length"]
-        all_captions = [c[0] for c in batch['all_captions']]
-
-        # Motion Encode
-        #
-        # Current LM m2t generation path only consumes the serialized body/remainder
-        # motion stream as encoder input. Hand/rhand token prompts are not used in
-        # generate_conditional(task="m2t"), so we should not try to encode them here.
-        #
-        # When hand/rhand tokenizers exist, keep the body stream on the same shared-Q
-        # budget as LM training for length consistency, but avoid feeding 45-dim hand
-        # VAEs with concatenated 90-dim left+right features.
         motion_tokens = []
-        lengths_tokens = []
-        if self.hand_vae_cfg is None and self.rhand_vae_cfg is None:
-            feats_ref_body = feats_ref
-            q_use = self.lm_body_num_quantizers
-        else:
-            feats_ref_body = torch.cat([feats_ref[..., :30], feats_ref[..., 120:]], dim=-1)
-            q_use = self.lm_shared_num_quantizers
-
         for i in range(len(feats_ref)):
-            motion_token, _ = self.vae.encode(feats_ref_body[i:i + 1])
-            flat_motion, len_motion = self._flatten_single_tokens_for_lm(
-                motion_token[0], q_use
-            )
-            motion_tokens.append(flat_motion)
-            lengths_tokens.append(len_motion)
+            motion_tokens.append(self._encode_sign_tokens_from_motion(feats_ref[i:i + 1]))
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
-                                               lengths=lengths_tokens,
                                                task="m2t",
                                                stage='test',
                                                src=batch['src'],

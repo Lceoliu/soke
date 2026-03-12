@@ -100,7 +100,7 @@ class BaseModel(LightningModule):
 
     def on_test_epoch_end(self):
         #print before sync
-        if 'lm' in self.hparams.stage:
+        if 'lm' in self.hparams.stage and hasattr(self.metrics, "TM2TMetrics"):
             name2scores = getattr(self.metrics.TM2TMetrics, 'name2scores')
             metrics = ["how2sign_DTW_MPJPE_PA_lhand", "how2sign_DTW_MPJPE_PA_rhand", "how2sign_DTW_MPJPE_PA_body", 
                            "csl_DTW_MPJPE_PA_lhand", "csl_DTW_MPJPE_PA_rhand", "csl_DTW_MPJPE_PA_body",
@@ -127,7 +127,7 @@ class BaseModel(LightningModule):
         rank = self._safe_rank()
         save_dir = os.path.join(self.output_dir, f'{self.hparams.cfg.TEST.SPLIT}_rank_{rank}')
         os.makedirs(save_dir, exist_ok=True)
-        if 'lm' in self.hparams.stage:
+        if 'lm' in self.hparams.stage and hasattr(self.metrics, "TM2TMetrics"):
             with open(os.path.join(save_dir, 'test_scores.json'), 'w') as f:
                 json.dump(getattr(self.metrics.TM2TMetrics, 'name2scores'), f)
         elif 'vae' in self.hparams.stage:

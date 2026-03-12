@@ -105,10 +105,6 @@ class GPTLosses(BaseLosses):
         elif stage in ["lm_pretrain", "lm_instruct"]:
             losses.append("gpt_loss")
             params['gpt_loss'] = cfg.LOSS.LAMBDA_CLS
-            losses.append("gpthand_loss")
-            params['gpthand_loss'] = cfg.LOSS.LAMBDA_CLS
-            losses.append("gptrhand_loss")
-            params['gptrhand_loss'] = cfg.LOSS.LAMBDA_CLS
 
         # Define loss functions & weights
         losses_func = {}
@@ -263,16 +259,17 @@ class GPTLosses(BaseLosses):
 
         if self.stage in ["lm_pretrain", "lm_instruct"]:
             if type(rs_set['outputs']) == dict:
-                total += self._update_loss("gpt_loss", rs_set['outputs']['loss'],
-                                       rs_set['outputs']['loss'])
-                total += self._update_loss("gpthand_loss", rs_set['outputs']['loss_hand'],
-                                       rs_set['outputs']['loss_hand'])
-                if rs_set['outputs']['loss_rhand'] is not None:
-                    total += self._update_loss("gptrhand_loss", rs_set['outputs']['loss_rhand'],
-                                       rs_set['outputs']['loss_rhand'])
+                total += self._update_loss(
+                    "gpt_loss",
+                    rs_set['outputs']['loss'],
+                    rs_set['outputs']['loss'],
+                )
             else:
-                total += self._update_loss("gpt_loss", rs_set['outputs'].loss,
-                                        rs_set['outputs'].loss)
+                total += self._update_loss(
+                    "gpt_loss",
+                    rs_set['outputs'].loss,
+                    rs_set['outputs'].loss,
+                )
 
         # Update the total loss
         self.total += total.detach()

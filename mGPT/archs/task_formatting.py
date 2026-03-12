@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
 
-SPECIAL_TASK_TOKENS = ["<mc>", "<m2t>", "<sign>", "</sign>", "<text>", "</text>"]
+SPECIAL_TASK_TOKENS = [
+    "<t2m>",
+    "<m2t>",
+    "<mc>",
+    "<sign>",
+    "</sign>",
+    "<text>",
+    "</text>",
+    "<cont>",
+    "</cont>",
+]
 
 
 @dataclass
@@ -14,8 +24,8 @@ class CausalTaskBatch:
     input_ids: torch.Tensor
     labels: torch.Tensor
     attention_mask: torch.Tensor
-    spans: List[Dict[str, Tuple[int, int]]]
     raw_sequences: List[str]
+    task_names: List[str]
 
 
 def add_missing_special_tokens(tokenizer) -> List[str]:
@@ -47,39 +57,36 @@ def serialize_sign_tokens(
             pieces.append(f"<hand_id_{int(lhand[idx])}>")
         if rhand is not None:
             pieces.append(f"<rhand_id_{int(rhand[idx])}>")
-    return "".join(pieces)
+    return " ".join(pieces)
 
 
 class SignLanguageTaskFormatter:
-    """
-    Build causal training sequences for future decoder-only sign-language tasks.
-
-    This module is intentionally independent from the current lm training loop.
-    It only serializes task strings and produces label masks that can be fed into
-    an autoregressive model with teacher forcing.
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        map_token_ids: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        device: Optional[torch.device] = None,
-    ) -> None:
+    def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
-        self.map_token_ids = map_token_ids
-        self.device = device
         add_missing_special_tokens(self.tokenizer)
+        self.special_id_map: Dict[str, int] = {
+            tok: self.tokenizer.convert_tokens_to_ids(tok) for tok in SPECIAL_TASK_TOKENS
+        }
 
-    def _tokenize_piece(self, text: str) -> List[int]:
+    def _tokenize_text(self, text: str) -> List[int]:
         return self.tokenizer(text, add_special_tokens=False).input_ids
 
-    def _stack_batch(self, sequences: List[List[int]], labels: List[List[int]], spans):
+    def _token_id(self, token: str) -> int:
+        return int(self.special_id_map[token])
+
+    def _pad_and_stack(
+        self,
+        sequences: List[List[int]],
+        labels: List[List[int]],
+        raw_sequences: List[str],
+        task_names: List[str],
+    ) -> CausalTaskBatch:
         if len(sequences) == 0:
             raise ValueError("Empty batch is not supported.")
 
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
-            raise ValueError("Tokenizer must define pad_token_id for causal batch building.")
+            raise ValueError("Tokenizer must define pad_token_id for causal task batching.")
 
         max_len = max(len(x) for x in sequences)
         batch = torch.full((len(sequences), max_len), pad_id, dtype=torch.long)
@@ -87,104 +94,116 @@ class SignLanguageTaskFormatter:
         attn = torch.zeros((len(sequences), max_len), dtype=torch.long)
 
         for i, (seq, cur_lab) in enumerate(zip(sequences, labels)):
-            cur_len = len(seq)
-            batch[i, :cur_len] = torch.tensor(seq, dtype=torch.long)
-            lab[i, :cur_len] = torch.tensor(cur_lab, dtype=torch.long)
-            attn[i, :cur_len] = 1
-
-        if self.map_token_ids is not None:
-            batch = self.map_token_ids(batch)
-            valid = lab != -100
-            if valid.any():
-                lab_mapped = self.map_token_ids(lab.masked_fill(~valid, pad_id))
-                lab = torch.where(valid, lab_mapped, torch.full_like(lab_mapped, -100))
-
-        if self.device is not None:
-            batch = batch.to(self.device)
-            lab = lab.to(self.device)
-            attn = attn.to(self.device)
+            seq_len = len(seq)
+            batch[i, :seq_len] = torch.tensor(seq, dtype=torch.long)
+            lab[i, :seq_len] = torch.tensor(cur_lab, dtype=torch.long)
+            attn[i, :seq_len] = 1
 
         return CausalTaskBatch(
             input_ids=batch,
             labels=lab,
             attention_mask=attn,
-            spans=spans,
-            raw_sequences=[],
+            raw_sequences=raw_sequences,
+            task_names=task_names,
         )
 
-    def build_motion_continuation(
+    def _build_t2m_sample(self, text: str, sign_token_ids: Sequence[int]):
+        seq = [
+            self._token_id("<t2m>"),
+            self._token_id("<text>"),
+            *self._tokenize_text(text),
+            self._token_id("</text>"),
+            self._token_id("<sign>"),
+            *list(sign_token_ids),
+            self._token_id("</sign>"),
+        ]
+        loss_start = len(seq) - len(sign_token_ids) - 1
+        labels = [-100] * loss_start + list(sign_token_ids) + [self._token_id("</sign>")]
+        raw = f"<t2m> <text> {text} </text> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(sign_token_ids))} </sign>"
+        return seq, labels, raw
+
+    def _build_m2t_sample(self, text: str, sign_token_ids: Sequence[int]):
+        text_ids = self._tokenize_text(text)
+        seq = [
+            self._token_id("<m2t>"),
+            self._token_id("<sign>"),
+            *list(sign_token_ids),
+            self._token_id("</sign>"),
+            self._token_id("<text>"),
+            *text_ids,
+            self._token_id("</text>"),
+        ]
+        prefix_len = len(seq) - len(text_ids) - 1
+        labels = [-100] * prefix_len + text_ids + [self._token_id("</text>")]
+        raw = f"<m2t> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(sign_token_ids))} </sign> <text> {text} </text>"
+        return seq, labels, raw
+
+    def _build_mc_sample(
         self,
-        sign_strings: Sequence[str],
-    ) -> CausalTaskBatch:
-        sequences: List[List[int]] = []
-        labels: List[List[int]] = []
-        spans = []
-        raw_sequences = []
+        sign_token_ids: Sequence[int],
+        prefix_ratio: float = 0.5,
+        min_prefix_tokens: int = 6,
+    ):
+        sign_token_ids = list(sign_token_ids)
+        if len(sign_token_ids) < 2:
+            prefix = sign_token_ids[:1]
+            target = sign_token_ids[1:]
+        else:
+            split_idx = max(min_prefix_tokens, int(round(len(sign_token_ids) * prefix_ratio)))
+            split_idx = min(max(split_idx, 1), len(sign_token_ids) - 1)
+            prefix = sign_token_ids[:split_idx]
+            target = sign_token_ids[split_idx:]
 
-        mc_ids = self._tokenize_piece("<mc>")
-        sign_open_ids = self._tokenize_piece("<sign>")
-        sign_close_ids = self._tokenize_piece("</sign>")
+        seq = [
+            self._token_id("<mc>"),
+            self._token_id("<sign>"),
+            *prefix,
+            self._token_id("</sign>"),
+            self._token_id("<cont>"),
+            *target,
+            self._token_id("</cont>"),
+        ]
+        prefix_len = len(seq) - len(target) - 1
+        labels = [-100] * prefix_len + target + [self._token_id("</cont>")]
+        raw = (
+            f"<mc> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(prefix))} </sign> "
+            f"<cont> {' '.join(self.tokenizer.convert_ids_to_tokens(target))} </cont>"
+        )
+        return seq, labels, raw
 
-        for sign_str in sign_strings:
-            sign_ids = self._tokenize_piece(sign_str)
-            seq = mc_ids + sign_open_ids + sign_ids + sign_close_ids
-            cur_labels = [-100] * (len(mc_ids) + len(sign_open_ids))
-            cur_labels += list(sign_ids)
-            cur_labels += [-100] * len(sign_close_ids)
-            sequences.append(seq)
-            labels.append(cur_labels)
-            sign_start = len(mc_ids) + len(sign_open_ids)
-            sign_end = sign_start + len(sign_ids)
-            spans.append(
-                {
-                    "sign": (sign_start, sign_end),
-                    "loss": (sign_start, sign_end),
-                }
-            )
-            raw_sequences.append(f"<mc><sign>{sign_str}</sign>")
-
-        batch = self._stack_batch(sequences, labels, spans)
-        batch.raw_sequences = raw_sequences
-        return batch
-
-    def build_motion_to_text(
+    def build_batch(
         self,
-        sign_strings: Sequence[str],
+        task_names: Sequence[str],
         texts: Sequence[str],
+        sign_token_ids: Sequence[Sequence[int]],
+        mc_prefix_ratio: float = 0.5,
     ) -> CausalTaskBatch:
-        if len(sign_strings) != len(texts):
-            raise ValueError("sign_strings and texts must have the same batch size.")
+        if not (len(task_names) == len(texts) == len(sign_token_ids)):
+            raise ValueError("task_names, texts, and sign_token_ids must have the same batch size.")
 
         sequences: List[List[int]] = []
         labels: List[List[int]] = []
-        spans = []
-        raw_sequences = []
+        raw_sequences: List[str] = []
+        normalized_tasks: List[str] = []
 
-        m2t_ids = self._tokenize_piece("<m2t>")
-        sign_open_ids = self._tokenize_piece("<sign>")
-        sign_close_ids = self._tokenize_piece("</sign>")
-        text_open_ids = self._tokenize_piece("<text>")
-        text_close_ids = self._tokenize_piece("</text>")
+        for task_name, text, cur_sign_ids in zip(task_names, texts, sign_token_ids):
+            task_name = str(task_name).lower()
+            if task_name == "t2m":
+                seq, lab, raw = self._build_t2m_sample(text=text, sign_token_ids=cur_sign_ids)
+            elif task_name == "m2t":
+                seq, lab, raw = self._build_m2t_sample(text=text, sign_token_ids=cur_sign_ids)
+            elif task_name in ["mc", "pred", "continuation"]:
+                seq, lab, raw = self._build_mc_sample(
+                    sign_token_ids=cur_sign_ids,
+                    prefix_ratio=mc_prefix_ratio,
+                )
+                task_name = "mc"
+            else:
+                raise NotImplementedError(f"Unsupported causal task: {task_name}")
 
-        for sign_str, text in zip(sign_strings, texts):
-            sign_ids = self._tokenize_piece(sign_str)
-            text_ids = self._tokenize_piece(text)
-            seq = m2t_ids + sign_open_ids + sign_ids + sign_close_ids + text_open_ids + text_ids + text_close_ids
-            prefix_len = len(m2t_ids) + len(sign_open_ids) + len(sign_ids) + len(sign_close_ids) + len(text_open_ids)
-            cur_labels = [-100] * prefix_len + list(text_ids) + [-100] * len(text_close_ids)
             sequences.append(seq)
-            labels.append(cur_labels)
-            text_start = prefix_len
-            text_end = text_start + len(text_ids)
-            spans.append(
-                {
-                    "sign": (len(m2t_ids) + len(sign_open_ids), len(m2t_ids) + len(sign_open_ids) + len(sign_ids)),
-                    "text": (text_start, text_end),
-                    "loss": (text_start, text_end),
-                }
-            )
-            raw_sequences.append(f"<m2t><sign>{sign_str}</sign><text>{text}</text>")
+            labels.append(lab)
+            raw_sequences.append(raw)
+            normalized_tasks.append(task_name)
 
-        batch = self._stack_batch(sequences, labels, spans)
-        batch.raw_sequences = raw_sequences
-        return batch
+        return self._pad_and_stack(sequences, labels, raw_sequences, normalized_tasks)
