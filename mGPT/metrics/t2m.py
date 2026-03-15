@@ -19,11 +19,13 @@ class TM2TMetrics(Metric):
                  R_size=32,
                  diversity_times=300,
                  dist_sync_on_step=True,
+                 metric_prefix='',
                  **kwargs):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
 
         self.cfg = cfg
         self.dataname = dataname
+        self.metric_prefix = str(metric_prefix)
         self.name = "MPJPE, MPVPE DTW"
         # self.top_k = top_k
         # self.R_size = R_size
@@ -91,7 +93,8 @@ class TM2TMetrics(Metric):
         mr_metrics = {}
         for name in self.metrics:
             d = name.split('_')[0]
-            mr_metrics[name] = getattr(self, name) / max(getattr(self, f'{d}_count_seq'), 1e-6)
+            out_name = f"{self.metric_prefix}{name}"
+            mr_metrics[out_name] = getattr(self, name) / max(getattr(self, f'{d}_count_seq'), 1e-6)
 
         for name, v in mr_metrics.items():
             print(name, ': ', v)

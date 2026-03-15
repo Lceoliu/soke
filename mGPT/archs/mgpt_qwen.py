@@ -48,6 +48,7 @@ class QwenCausalLM(nn.Module):
         self.hand_codebook_size = int(hand_codebook_size)
         self.rhand_codebook_size = int(rhand_codebook_size)
         self.mc_prefix_ratio = float(mc_prefix_ratio)
+        self.num_token_parts = 1 + int(self.hand_codebook_size > 0) + int(self.rhand_codebook_size > 0)
         self.model_dtype = self._resolve_torch_dtype(torch_dtype)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -243,6 +244,7 @@ class QwenCausalLM(nn.Module):
             texts=texts,
             sign_token_ids=sign_token_ids,
             mc_prefix_ratio=self.mc_prefix_ratio,
+            mc_group_size=self.num_token_parts,
         )
 
         input_ids = batch.input_ids.to(self.device)
@@ -276,6 +278,13 @@ class QwenCausalLM(nn.Module):
         sign_token_ids = list(sign_token_ids)
         split_idx = max(1, int(round(len(sign_token_ids) * self.mc_prefix_ratio)))
         split_idx = min(split_idx, max(len(sign_token_ids) - 1, 1))
+        if self.num_token_parts > 1:
+            split_idx = max(self.num_token_parts, (split_idx // self.num_token_parts) * self.num_token_parts)
+            if split_idx >= len(sign_token_ids):
+                split_idx = max(
+                    self.num_token_parts,
+                    ((len(sign_token_ids) - 1) // self.num_token_parts) * self.num_token_parts,
+                )
         prefix = sign_token_ids[:split_idx]
         seq = [
             self.special_token_ids["<mc>"],
@@ -428,6 +437,8 @@ class QwenCausalLM(nn.Module):
             if motion_tokens is None:
                 raise ValueError("motion_tokens must be provided for mc generation.")
             outputs_tokens = []
+            outputs_tokens_hand = []
+            outputs_tokens_rhand = []
             for cur_tokens in motion_tokens:
                 sign_token_ids = self._motion_tensor_to_sign_token_ids(cur_tokens)
                 prompt_ids = self._make_mc_prompt(sign_token_ids)
@@ -437,9 +448,21 @@ class QwenCausalLM(nn.Module):
                     do_sample=do_sample,
                 )
                 tail_ids = self._extract_after_prompt(output_ids, prompt_ids.shape[1])
-                body, _, _ = self._parse_generated_sign_tokens(tail_ids)
+                body, lhand, rhand = self._parse_generated_sign_tokens(tail_ids)
                 outputs_tokens.append(body)
-            return outputs_tokens
+                outputs_tokens_hand.append(
+                    lhand if lhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
+                )
+                outputs_tokens_rhand.append(
+                    rhand if rhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
+                )
+            has_lhand = any(x.numel() > 0 for x in outputs_tokens_hand)
+            has_rhand = any(x.numel() > 0 for x in outputs_tokens_rhand)
+            return {
+                "outputs_tokens": outputs_tokens,
+                "outputs_tokens_hand": outputs_tokens_hand if has_lhand else None,
+                "outputs_tokens_rhand": outputs_tokens_rhand if has_rhand else None,
+            }
 
         raise NotImplementedError(f"Unsupported generation task: {task}")
 

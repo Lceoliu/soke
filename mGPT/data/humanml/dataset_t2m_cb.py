@@ -60,6 +60,10 @@ class Text2MotionDatasetCB(data.Dataset):
         self.code_path = code_path
         self.lm_token_num_quantizers = int(kwargs.get("lm_token_num_quantizers", 1))
         self.lm_token_num_parts = int(kwargs.get("lm_token_num_parts", 1))
+        self.dynamic_task_sampling = bool(kwargs.get("dynamic_task_sampling", False))
+        self.fixed_task = kwargs.get("fixed_task", None)
+        self.train_task_classes = list(kwargs.get("train_task_classes", []))
+        self.task_sampling = kwargs.get("task_sampling", {}) or {}
         
         if task_path:
             instructions = task_path
@@ -142,9 +146,36 @@ class Text2MotionDatasetCB(data.Dataset):
             for subtask in self.instructions[task].keys():
                 self.tasks.append(self.instructions[task][subtask])
 
+        if self.fixed_task is not None:
+            self.dynamic_task_sampling = False
+            self.fixed_task = str(self.fixed_task).lower()
+        elif self.dynamic_task_sampling:
+            if len(self.train_task_classes) == 0:
+                self.train_task_classes = ["t2m", "m2t", "mc"]
+            self.train_task_classes = [str(x).lower() for x in self.train_task_classes]
+            weights = []
+            for task_name in self.train_task_classes:
+                weights.append(float(self.task_sampling.get(task_name, 0.0)))
+            if sum(weights) <= 0.0:
+                raise ValueError(
+                    "dynamic_task_sampling is enabled, but task_sampling contains no positive weights."
+                )
+            total = float(sum(weights))
+            self.train_task_weights = [w / total for w in weights]
+
 
     def __len__(self):
+        if self.fixed_task is not None or self.dynamic_task_sampling:
+            return len(self.all_data)
         return len(self.all_data) * len(self.tasks)
+
+    def _sample_task(self):
+        if self.fixed_task is not None:
+            return {"class": self.fixed_task}
+        if self.dynamic_task_sampling:
+            task_name = random.choices(self.train_task_classes, weights=self.train_task_weights, k=1)[0]
+            return {"class": task_name}
+        return None
 
     def _flatten_motion_tokens(self, m_tokens):
         tokens = np.asarray(m_tokens)
@@ -167,8 +198,12 @@ class Text2MotionDatasetCB(data.Dataset):
 
 
     def __getitem__(self, idx):
-        data_idx = idx % len(self.all_data)
-        task_idx = idx // len(self.all_data)
+        if self.fixed_task is not None or self.dynamic_task_sampling:
+            data_idx = idx
+            task_idx = None
+        else:
+            data_idx = idx % len(self.all_data)
+            task_idx = idx // len(self.all_data)
         sample = self.all_data[data_idx]
         src = sample['src']
         # caption = sample['text']
@@ -212,6 +247,9 @@ class Text2MotionDatasetCB(data.Dataset):
                 m_tokens = m_tokens[drop_count:]
         m_length = m_tokens.shape[0]
 
-        tasks = self.tasks[task_idx]
+        if self.fixed_task is not None or self.dynamic_task_sampling:
+            tasks = self._sample_task()
+        else:
+            tasks = self.tasks[task_idx]
 
         return caption, torch.from_numpy(m_tokens).long(), m_length, name, None, None, None, all_captions, tasks, src

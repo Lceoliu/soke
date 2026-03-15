@@ -42,8 +42,8 @@ class BaseModel(LightningModule):
     def training_step(self, batch, batch_idx):
         return self.allsplit_step("train", batch, batch_idx)
 
-    def validation_step(self, batch, batch_idx):
-        return self.allsplit_step("val", batch, batch_idx)
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        return self.allsplit_step("val", batch, batch_idx, dataloader_idx=dataloader_idx)
 
     def test_step(self, batch, batch_idx):
         outputs = self.allsplit_step("test", batch, batch_idx)
@@ -87,7 +87,8 @@ class BaseModel(LightningModule):
         dico = self.step_log_dict()
         # Log losses
         dico.update(self.loss_log_dict('train'))
-        dico.update(self.loss_log_dict('val'))
+        if 'lm' not in str(self.hparams.stage):
+            dico.update(self.loss_log_dict('val'))
         # Log metrics
         dico.update(self.metrics_log_dict())
         # print('dico', dico)

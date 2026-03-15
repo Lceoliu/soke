@@ -21,6 +21,13 @@ class BaseMetrics(nn.Module):
                 diversity_times=30 if debug else cfg.METRIC.DIVERSITY_TIMES,
                 dist_sync_on_step=cfg.METRIC.DIST_SYNC_ON_STEP,
             )
+            self.MCMetrics = TM2TMetrics(
+                cfg=cfg,
+                dataname=data_name,
+                diversity_times=30 if debug else cfg.METRIC.DIVERSITY_TIMES,
+                dist_sync_on_step=cfg.METRIC.DIST_SYNC_ON_STEP,
+                metric_prefix="mc_",
+            )
             self.M2TMetrics = M2TMetrics(
                 cfg=cfg,
                 w_vectorizer=datamodule.hparams.w_vectorizer,

@@ -242,7 +242,7 @@ class MotionGPT(BaseModel):
 
         return outputs
 
-    def train_lm_forward(self, batch):
+    def train_lm_forward(self, batch, forced_task=None):
         tokens_ref = batch["motion"]
         texts = batch["text"]
         lengths = batch["length"]
@@ -251,6 +251,8 @@ class MotionGPT(BaseModel):
         tokens_ref, lengths = self._flatten_batch_tokens_for_lm(tokens_ref, lengths)
         if self.hparams.condition == 'caption':
             texts = [random.choice(all_captions[i]) for i in range(len(texts))]
+        if forced_task is not None:
+            tasks = [{"class": str(forced_task).lower()} for _ in range(len(texts))]
 
         # LLM Forward
         outputs = self.lm(texts, tokens_ref, lengths, tasks, src=batch['src'], name=batch['name'])
@@ -388,6 +390,111 @@ class MotionGPT(BaseModel):
         min_len = min(flat_body.shape[0], flat_hand.shape[0])
         return torch.stack([flat_body[:min_len], flat_hand[:min_len]], dim=-1)
 
+    def _resolve_eval_task_name(self, split: str, dataloader_idx: int = 0):
+        if split != "val":
+            return str(self.hparams.task).lower()
+        if hasattr(self.datamodule, "get_val_task_name"):
+            return str(self.datamodule.get_val_task_name(int(dataloader_idx))).lower()
+        return str(self.hparams.task).lower()
+
+    def _decode_generated_motion_parts(
+        self,
+        feats_ref: torch.Tensor,
+        outputs_tokens,
+        outputs_tokens_hand=None,
+        outputs_tokens_rhand=None,
+        base_lengths=None,
+    ):
+        B, _, C = feats_ref.shape
+        if base_lengths is None:
+            base_lengths = [1] * B
+        rst_len = list(base_lengths)
+
+        q_body_use = self.lm_body_num_quantizers
+        q_hand_use = self.lm_hand_num_quantizers
+        q_rhand_use = self.lm_rhand_num_quantizers
+        if outputs_tokens_hand is not None or outputs_tokens_rhand is not None:
+            q_body_use = q_hand_use = q_rhand_use = self.lm_shared_num_quantizers
+
+        outputs_tokens = [self._unflatten_single_tokens_from_lm(tok, q_body_use) for tok in outputs_tokens]
+        if outputs_tokens_hand is not None:
+            outputs_tokens_hand = [
+                self._unflatten_single_tokens_from_lm(tok, q_hand_use) for tok in outputs_tokens_hand
+            ]
+        if outputs_tokens_rhand is not None:
+            outputs_tokens_rhand = [
+                self._unflatten_single_tokens_from_lm(tok, q_rhand_use) for tok in outputs_tokens_rhand
+            ]
+
+        max_len = max(map(len, outputs_tokens)) if len(outputs_tokens) > 0 else 1
+        if outputs_tokens_hand is not None and len(outputs_tokens_hand) > 0:
+            max_len = max(max_len, max(map(len, outputs_tokens_hand)))
+        if outputs_tokens_rhand is not None and len(outputs_tokens_rhand) > 0:
+            max_len = max(max_len, max(map(len, outputs_tokens_rhand)))
+        max_len = max(int(max_len) * 4, 1)
+
+        feats_rst = torch.zeros(B, max_len, C).to(feats_ref)
+        for i in range(B):
+            body_tokens = torch.clamp(outputs_tokens[i], 0, self.vae.code_num - 1)
+            if len(body_tokens) > 1:
+                motion = self.vae.decode(body_tokens)
+                rst_len[i] = motion.shape[1]
+                motion = F.pad(motion, (0, 0, 0, max_len - motion.shape[1]), mode='replicate')
+            else:
+                if outputs_tokens_hand is None:
+                    motion = torch.zeros((1, max_len, C), device=feats_ref.device, dtype=feats_ref.dtype)
+                else:
+                    motion = torch.zeros((1, max_len, self.vae.nfeats), device=feats_ref.device, dtype=feats_ref.dtype)
+                rst_len[i] = 1
+            feats_rst[i:i + 1, :, :30] = motion[..., :30]
+            feats_rst[i:i + 1, :, -13:] = motion[..., 30:43]
+
+            if outputs_tokens_hand is not None:
+                hand_tokens = torch.clamp(outputs_tokens_hand[i], 0, self.hand_vae.code_num - 1)
+                if len(hand_tokens) > 1:
+                    motion_hand = self.hand_vae.decode(hand_tokens)
+                    rst_len[i] = max(rst_len[i], motion_hand.shape[1])
+                    motion_hand = F.pad(motion_hand, (0, 0, 0, max_len - motion_hand.shape[1]), mode='replicate')
+                else:
+                    motion_hand = torch.zeros((1, max_len, self.hand_vae.nfeats), device=feats_ref.device, dtype=feats_ref.dtype)
+                feats_rst[i:i + 1, :, 30:30 + self.hand_vae.nfeats] = motion_hand
+
+            if outputs_tokens_rhand is not None:
+                rhand_tokens = torch.clamp(outputs_tokens_rhand[i], 0, self.rhand_vae.code_num - 1)
+                if len(rhand_tokens) > 1:
+                    motion_rhand = self.rhand_vae.decode(rhand_tokens)
+                    rst_len[i] = max(rst_len[i], motion_rhand.shape[1])
+                    motion_rhand = F.pad(motion_rhand, (0, 0, 0, max_len - motion_rhand.shape[1]), mode='replicate')
+                else:
+                    motion_rhand = torch.zeros((1, max_len, self.rhand_vae.nfeats), device=feats_ref.device, dtype=feats_ref.dtype)
+                feats_rst[i:i + 1, :, 75:75 + self.rhand_vae.nfeats] = motion_rhand
+
+        return feats_rst, rst_len
+
+    @staticmethod
+    def _build_suffix_reference_batch(feats_ref: torch.Tensor, lengths, ratio: float):
+        B, _, C = feats_ref.shape
+        ratio = float(ratio)
+        suffix_list = []
+        suffix_lengths = []
+        for i in range(B):
+            cur_len = int(lengths[i])
+            if cur_len <= 1:
+                split_idx = 0
+            else:
+                split_idx = int(round(cur_len * ratio))
+                split_idx = min(max(split_idx, 1), cur_len - 1)
+            cur_suffix = feats_ref[i, split_idx:cur_len]
+            if cur_suffix.shape[0] <= 0:
+                cur_suffix = feats_ref[i, cur_len - 1:cur_len]
+            suffix_list.append(cur_suffix)
+            suffix_lengths.append(int(cur_suffix.shape[0]))
+        max_len = max(suffix_lengths) if len(suffix_lengths) > 0 else 1
+        suffix_batch = feats_ref.new_zeros((B, max_len, C))
+        for i, cur_suffix in enumerate(suffix_list):
+            suffix_batch[i, :cur_suffix.shape[0]] = cur_suffix
+        return suffix_batch, suffix_lengths
+
     def on_train_epoch_start(self):
         if str(self.hparams.stage) != "vae":
             return
@@ -398,8 +505,6 @@ class MotionGPT(BaseModel):
     @torch.no_grad()
     def val_t2m_forward(self, batch, vis=False):
         feats_ref = batch["motion"]
-        # print(feats_ref.shape)
-        B, T, C = feats_ref.shape
         texts = batch["text"]
         lengths = batch["length"]
         tasks = None
@@ -440,91 +545,13 @@ class MotionGPT(BaseModel):
         outputs_tokens = gen_results['outputs_tokens']
         outputs_tokens_hand = gen_results['outputs_tokens_hand']
         outputs_tokens_rhand = gen_results['outputs_tokens_rhand']
-
-        q_body_use = self.lm_body_num_quantizers
-        q_hand_use = self.lm_hand_num_quantizers
-        q_rhand_use = self.lm_rhand_num_quantizers
-        if outputs_tokens_hand is not None or outputs_tokens_rhand is not None:
-            q_body_use = q_hand_use = q_rhand_use = self.lm_shared_num_quantizers
-
-        for i in range(len(outputs_tokens)):
-            outputs_tokens[i] = self._unflatten_single_tokens_from_lm(outputs_tokens[i], q_body_use)
-        if outputs_tokens_hand is not None:
-            for i in range(len(outputs_tokens_hand)):
-                outputs_tokens_hand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_hand[i], q_hand_use)
-        if outputs_tokens_rhand is not None:
-            for i in range(len(outputs_tokens_rhand)):
-                outputs_tokens_rhand[i] = self._unflatten_single_tokens_from_lm(outputs_tokens_rhand[i], q_rhand_use)
-
-        max_len = max(map(len, outputs_tokens))
-        if outputs_tokens_hand is not None:
-            max_hand_len = max(map(len, outputs_tokens_hand))
-            max_len = max(max_hand_len, max_len)
-        if outputs_tokens_rhand is not None:
-            max_rhand_len = max(map(len, outputs_tokens_rhand))
-            max_len = max(max_rhand_len, max_len)
-        max_len *= 4  #upsample factor
-        # print('tokens_re: ', len(outputs_tokens), outputs_tokens[0].shape)
-        # print('tokens_hand: ', len(outputs_tokens_hand), outputs_tokens_hand[0].shape)
-
-        # Motion Decode
-        # feats_rst = torch.zeros_like(feats_ref)
-        feats_rst = torch.zeros(B, max_len, C).to(feats_ref)
-
-        for i in range(len(texts)):
-            name = batch['name'][i]
-
-            outputs_tokens[i] = torch.clamp(outputs_tokens[i],
-                                     0,
-                                     self.vae.code_num - 1,
-                                     out=None)
-
-            if len(outputs_tokens[i]) > 1:
-                motion = self.vae.decode(outputs_tokens[i])
-                rst_len[i] = motion.shape[1]
-                motion = F.pad(motion, (0, 0, 0, max_len-motion.shape[1]), mode='replicate')
-                # rst_len[i] = len(outputs_tokens[i])
-                # print('body len: ', len(outputs_tokens[i]))
-            else:
-                if outputs_tokens_hand is None:
-                    motion = torch.zeros(1, max_len, C)
-                else:
-                    motion = torch.zeros((1, max_len, self.vae.nfeats)).to(feats_ref.device)
-                rst_len[i] = 1 #max_len
-            feats_rst[i:i + 1, :, :30] = motion[..., :30]
-            feats_rst[i:i + 1, :, -13:] = motion[..., 30:43]
-
-            if outputs_tokens_hand is not None:
-                outputs_tokens_hand[i] = torch.clamp(outputs_tokens_hand[i],
-                                     0,
-                                     self.hand_vae.code_num - 1,
-                                     out=None)
-                if len(outputs_tokens_hand[i]) > 1:
-                    motion_hand = self.hand_vae.decode(outputs_tokens_hand[i])
-                    rst_len[i] = func(rst_len[i], motion_hand.shape[1])
-                    motion_hand = F.pad(motion_hand, (0, 0, 0, max_len-motion_hand.shape[1]), mode='replicate')
-                    # rst_len[i] = func(rst_len[i], len(outputs_tokens_hand[i]))
-                    # print('lhand len: ', len(outputs_tokens_hand[i]))
-                else:
-                    motion_hand = torch.zeros((1, max_len, self.hand_vae.nfeats)).to(feats_ref.device)
-                    rst_len[i] = min(rst_len[i], max_len)
-                feats_rst[i:i + 1, :, 30:30+self.hand_vae.nfeats] = motion_hand
-            
-            if outputs_tokens_rhand is not None:
-                outputs_tokens_rhand[i] = torch.clamp(outputs_tokens_rhand[i],
-                                     0,
-                                     self.rhand_vae.code_num - 1,
-                                     out=None)
-                if len(outputs_tokens_rhand[i]) > 1:
-                    motion_rhand = self.rhand_vae.decode(outputs_tokens_rhand[i])
-                    rst_len[i] = func(rst_len[i], motion_rhand.shape[1])
-                    motion_rhand = F.pad(motion_rhand, (0, 0, 0, max_len-motion_rhand.shape[1]), mode='replicate')
-                    # rst_len[i] = func(rst_len[i], len(outputs_tokens_rhand[i]))
-                    # print('rhand len: ', len(outputs_tokens_rhand[i]))
-                else:
-                    motion_rhand = torch.zeros((1, max_len, self.rhand_vae.nfeats)).to(feats_ref.device)
-                    rst_len[i] = min(rst_len[i], max_len)
-                feats_rst[i:i + 1, :, 75:75+self.hand_vae.nfeats] = motion_rhand
+        feats_rst, rst_len = self._decode_generated_motion_parts(
+            feats_ref=feats_ref,
+            outputs_tokens=outputs_tokens,
+            outputs_tokens_hand=outputs_tokens_hand,
+            outputs_tokens_rhand=outputs_tokens_rhand,
+            base_lengths=rst_len,
+        )
 
         # Recover joints for evaluation
         vertices_ref, joints_ref = self.feats2joints(feats_ref)
@@ -574,6 +601,49 @@ class MotionGPT(BaseModel):
             "length": lengths
         }
 
+        return rs_set
+
+    @torch.no_grad()
+    def val_mc_forward(self, batch):
+        feats_ref_full = batch["motion"]
+        lengths_full = batch["length"]
+        ratio = float(getattr(self.lm, "mc_prefix_ratio", 0.5))
+        motion_tokens = []
+        for i in range(len(feats_ref_full)):
+            motion_tokens.append(self._encode_sign_tokens_from_motion(feats_ref_full[i:i + 1]))
+
+        gen_results = self.lm.generate_conditional(
+            motion_tokens=motion_tokens,
+            task="mc",
+            stage='test',
+            src=batch['src'],
+            name=batch['name'],
+        )
+        feats_ref, lengths = self._build_suffix_reference_batch(feats_ref_full, lengths_full, ratio)
+        feats_rst, rst_len = self._decode_generated_motion_parts(
+            feats_ref=feats_ref,
+            outputs_tokens=gen_results['outputs_tokens'],
+            outputs_tokens_hand=gen_results.get('outputs_tokens_hand', None),
+            outputs_tokens_rhand=gen_results.get('outputs_tokens_rhand', None),
+            base_lengths=lengths,
+        )
+
+        vertices_ref, joints_ref = self.feats2joints(feats_ref)
+        vertices_rst, joints_rst = self.feats2joints(feats_rst)
+
+        feats_ref = self.datamodule.renorm4t2m(feats_ref)
+        feats_rst = self.datamodule.renorm4t2m(feats_rst)
+
+        rs_set = {
+            "m_ref": feats_ref,
+            "m_rst": feats_rst,
+            "joints_ref": joints_ref,
+            "joints_rst": joints_rst,
+            "vertices_ref": vertices_ref,
+            "vertices_rst": vertices_rst,
+            "length": lengths,
+            "lengths_rst": rst_len,
+        }
         return rs_set
 
     @torch.no_grad()
@@ -847,7 +917,7 @@ class MotionGPT(BaseModel):
         return rs_set
     
 
-    def allsplit_step(self, split: str, batch, batch_idx):
+    def allsplit_step(self, split: str, batch, batch_idx, dataloader_idx: int = 0):
         # Compute the losses
         loss = None
         lengths = batch['length']
@@ -877,36 +947,56 @@ class MotionGPT(BaseModel):
                             name=name
                         )
             elif self.hparams.stage in ["lm_instruct", "lm_pretrain", "lm_rl"]:
-                if self.hparams.task == "t2m":
+                eval_task = self._resolve_eval_task_name(split, dataloader_idx=dataloader_idx)
+                if split == "val":
+                    rs_set_loss = self.train_lm_forward(batch, forced_task=eval_task)
+                    cur_val_loss = rs_set_loss['outputs'].loss if hasattr(rs_set_loss['outputs'], "loss") else rs_set_loss['outputs']['loss']
+                    self.log(
+                        f"val/{eval_task}_loss",
+                        cur_val_loss.detach().float(),
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        sync_dist=True,
+                    )
+
+                if eval_task == "t2m":
                     rs_set = self.val_t2m_forward(batch)
                     getattr(self.metrics, 'TM2TMetrics').update(
-                            feats_rst=rs_set["m_rst"],
-                            feats_ref=rs_set["m_ref"],
-                            joints_rst=rs_set["joints_rst"], 
-                            joints_ref=rs_set["joints_ref"],
-                            vertices_rst=rs_set["vertices_rst"], 
-                            vertices_ref=rs_set["vertices_ref"],
-                            lengths=lengths,
-                            lengths_rst=rs_set['lengths_rst'],
-                            split=split,
-                            src=src,
-                            name=name
-                        )
-                    if "M2TMetrics" in self.hparams.metrics_dict:
-                        rs_set_m2t = self.val_m2t_forward(batch)
-                        getattr(self.metrics, 'M2TMetrics').update(
-                            pred_texts=rs_set_m2t["t_pred"],
-                            gt_texts=rs_set_m2t["t_ref"],
-                            lengths=rs_set_m2t['length'],
-                            src=src,
-                        )
-                elif self.hparams.task == "m2t":
+                        feats_rst=rs_set["m_rst"],
+                        feats_ref=rs_set["m_ref"],
+                        joints_rst=rs_set["joints_rst"],
+                        joints_ref=rs_set["joints_ref"],
+                        vertices_rst=rs_set["vertices_rst"],
+                        vertices_ref=rs_set["vertices_ref"],
+                        lengths=lengths,
+                        lengths_rst=rs_set['lengths_rst'],
+                        split=split,
+                        src=src,
+                        name=name
+                    )
+                elif eval_task == "m2t":
                     rs_set_m2t = self.val_m2t_forward(batch)
                     getattr(self.metrics, 'M2TMetrics').update(
                         pred_texts=rs_set_m2t["t_pred"],
                         gt_texts=rs_set_m2t["t_ref"],
                         lengths=rs_set_m2t['length'],
                         src=src,
+                    )
+                elif eval_task == "mc":
+                    rs_set_mc = self.val_mc_forward(batch)
+                    getattr(self.metrics, 'MCMetrics').update(
+                        feats_rst=rs_set_mc["m_rst"],
+                        feats_ref=rs_set_mc["m_ref"],
+                        joints_rst=rs_set_mc["joints_rst"],
+                        joints_ref=rs_set_mc["joints_ref"],
+                        vertices_rst=rs_set_mc["vertices_rst"],
+                        vertices_ref=rs_set_mc["vertices_ref"],
+                        lengths=rs_set_mc["length"],
+                        lengths_rst=rs_set_mc['lengths_rst'],
+                        split=split,
+                        src=src,
+                        name=name
                     )
                 # elif self.hparams.task in ["m2m", "pred", "inbetween"]:
                 #     rs_set = self.val_m2m_forward(batch, self.hparams.task)

@@ -57,6 +57,9 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         "BLEU_2": "Metrics/Bleu_2",
         "BLEU_3": "Metrics/Bleu_3",
         "BLEU_4": "Metrics/Bleu_4",
+        "val_t2m_loss": "val/t2m_loss",
+        "val_m2t_loss": "val/m2t_loss",
+        "val_mc_loss": "val/mc_loss",
         "how2sign_BLEU_1": "Metrics/how2sign_Bleu_1",
         "how2sign_BLEU_4": "Metrics/how2sign_Bleu_4",
         "csl_BLEU_1": "Metrics/csl_Bleu_1",
@@ -64,6 +67,9 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         "phoenix_BLEU_1": "Metrics/phoenix_Bleu_1",
         "phoenix_BLEU_4": "Metrics/phoenix_Bleu_4",
         "ROUGE_L": "Metrics/ROUGE_L",
+        "mc_how2sign_DTW_MPJPE_PA_lhand": "Metrics/mc_how2sign_DTW_MPJPE_PA_lhand",
+        "mc_csl_DTW_MPJPE_PA_lhand": "Metrics/mc_csl_DTW_MPJPE_PA_lhand",
+        "mc_phoenix_DTW_MPJPE_PA_lhand": "Metrics/mc_phoenix_DTW_MPJPE_PA_lhand",
     }
     callbacks.append(
         progressLogger(logger,metric_monitor=metric_monitor,log_every_n_steps=1))
@@ -170,6 +176,20 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
             'Metrics/ROUGE_L': {
                 'abbr': 'ROUGE_L',
                 'mode': 'max'
+            },
+        },
+        'MCMetrics': {
+            'Metrics/mc_how2sign_DTW_MPJPE_PA_lhand': {
+                'abbr': 'mc_how2sign_DTW_MPJPE_PA_lhand',
+                'mode': 'min'
+            },
+            'Metrics/mc_csl_DTW_MPJPE_PA_lhand': {
+                'abbr': 'mc_csl_DTW_MPJPE_PA_lhand',
+                'mode': 'min'
+            },
+            'Metrics/mc_phoenix_DTW_MPJPE_PA_lhand': {
+                'abbr': 'mc_phoenix_DTW_MPJPE_PA_lhand',
+                'mode': 'min'
             },
         },
         'MRMetrics': {

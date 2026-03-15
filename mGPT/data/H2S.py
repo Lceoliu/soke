@@ -2,12 +2,29 @@ import numpy as np
 import torch
 import os 
 from os.path import join as pjoin
+from torch.utils.data import DataLoader, Dataset
 from .humanml.utils.word_vectorizer import WordVectorizer
 from .humanml.scripts.motion_process import (process_file, recover_from_ric)
 from . import BASEDataModule
 from .humanml import Text2MotionDatasetEval, Text2MotionDataset, Text2MotionDatasetCB, MotionDataset, H2SMotionDatasetVQ, MotionDatasetVQ, Text2MotionDatasetToken, Text2MotionDatasetM2T
 from .utils import humanml3d_collate
 from mGPT.utils.human_models import get_coord
+
+
+class FixedTaskDataset(Dataset):
+    def __init__(self, base_dataset, task_name):
+        self.base_dataset = base_dataset
+        self.task_name = str(task_name).lower()
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        item = list(self.base_dataset[idx])
+        if len(item) < 10:
+            raise ValueError(f"Unexpected evaluation item length: {len(item)}")
+        item[8] = {"class": self.task_name}
+        return tuple(item)
 
 
 class H2SDataModule(BASEDataModule):
@@ -28,6 +45,13 @@ class H2SDataModule(BASEDataModule):
         self.hparams.use_contact_labels = bool(cfg.DATASET.H2S.get('USE_CONTACT_LABELS', False))
         self.hparams.contact_dir_name = str(cfg.DATASET.H2S.get('CONTACT_DIR_NAME', 'contact_labels'))
         self.hparams.pred_data_dir = cfg.DATASET.H2S.get('pred_data_dir', False)
+        self.hparams.dynamic_task_sampling = bool(cfg.DATASET.H2S.get('DYNAMIC_TASK_SAMPLING', False))
+        self.hparams.train_task_classes = list(cfg.DATASET.H2S.get('TRAIN_TASKS', ['t2m', 'm2t', 'mc']))
+        self.hparams.task_sampling = dict(cfg.DATASET.H2S.get(
+            'TASK_SAMPLING',
+            {'t2m': 0.5, 'm2t': 0.2, 'mc': 0.3},
+        ))
+        self.hparams.lm_val_tasks = list(cfg.EVAL.get('LM_VAL_TASKS', ['t2m', 'm2t', 'mc']))
         
         # Path to the dataset
         data_root = cfg.DATASET.H2S.ROOT
@@ -134,6 +158,24 @@ class H2SDataModule(BASEDataModule):
         # self._sample_set = self.get_sample_set(overrides={"split": "test", "tiny": True})
         self.nfeats = 133  #self._sample_set.nfeats
         cfg.DATASET.NFEATS = self.nfeats
+        self._val_task_datasets = None
+
+    @property
+    def val_task_datasets(self):
+        if self._val_task_datasets is None:
+            self._val_task_datasets = [
+                FixedTaskDataset(self.val_dataset, task_name)
+                for task_name in self.hparams.lm_val_tasks
+            ]
+        return self._val_task_datasets
+
+    def get_val_task_name(self, dataloader_idx: int) -> str:
+        task_names = list(self.hparams.lm_val_tasks)
+        if len(task_names) == 0:
+            return str(self.cfg.model.params.task)
+        if dataloader_idx < 0 or dataloader_idx >= len(task_names):
+            return task_names[0]
+        return str(task_names[dataloader_idx])
         
 
     def feats2joints(self, features):
@@ -196,3 +238,20 @@ class H2SDataModule(BASEDataModule):
         else:
             self.is_mm = False
             self.test_dataset.name_list = self.name_list
+
+    def val_dataloader(self):
+        if self.cfg.TRAIN.STAGE in ['lm_pretrain', 'lm_instruct', 'lm_rl'] and len(self.hparams.lm_val_tasks) > 1:
+            dataloader_options = self.dataloader_options.copy()
+            dataloader_options["batch_size"] = self.cfg.EVAL.BATCH_SIZE
+            dataloader_options["num_workers"] = self.cfg.EVAL.NUM_WORKERS
+            dataloader_options["shuffle"] = False
+            num_workers = int(dataloader_options["num_workers"])
+            return [
+                DataLoader(
+                    dataset,
+                    persistent_workers=(num_workers > 0),
+                    **dataloader_options,
+                )
+                for dataset in self.val_task_datasets
+            ]
+        return super().val_dataloader()

@@ -158,20 +158,35 @@ class ResidualLFQ(nn.Module):
         """
         Accepts:
         - [T] (single-level)
-        - [T, Q]
-        - [B, T] (single-level)
+        - [T, Q] where Q can be <= self.num_quantizers
+        - [B, T] (single-level; if you need this for multi-quantizer models,
+          prefer passing [B, T, 1] explicitly to avoid ambiguity)
         - [B, T, Q]
         Returns [..., C].
         """
         if code_idx.dim() == 1:
             flat_idx = code_idx.view(-1, 1)
             out_shape = (code_idx.shape[0],)
-        elif code_idx.dim() == 2 and (
-            self.num_quantizers == 1 or code_idx.shape[-1] != self.num_quantizers
-        ):
-            flat_idx = code_idx.reshape(-1, 1)
-            out_shape = tuple(code_idx.shape)
-        elif code_idx.dim() in (2, 3):
+        elif code_idx.dim() == 2:
+            # Ambiguous case for multi-quantizer models:
+            # - [T, Q_used] during partial-level decoding (e.g. shared-Q LM validation)
+            # - [B, T] for batched single-level codes
+            #
+            # In this codebase, VAE.decode() during LM validation passes [T, Q_used],
+            # and Q_used may be smaller than self.num_quantizers. Treat such 2D inputs
+            # as [T, Q] whenever the last dim can be interpreted as valid quantizer
+            # levels; callers that truly need batched single-level decoding should pass
+            # [B, T, 1] explicitly.
+            if self.num_quantizers > 1 and 1 < code_idx.shape[-1] <= self.num_quantizers:
+                flat_idx = code_idx.reshape(-1, code_idx.shape[-1])
+                out_shape = (code_idx.shape[0],)
+            elif self.num_quantizers > 1 and code_idx.shape[-1] == 1:
+                flat_idx = code_idx.reshape(-1, 1)
+                out_shape = (code_idx.shape[0],)
+            else:
+                flat_idx = code_idx.reshape(-1, 1)
+                out_shape = tuple(code_idx.shape)
+        elif code_idx.dim() == 3:
             flat_idx = code_idx.reshape(-1, code_idx.shape[-1])
             out_shape = tuple(code_idx.shape[:-1])
         else:

@@ -32,6 +32,7 @@ TRAIN:
 EVAL:
   BATCH_SIZE: 4 # 减小评估batch size
   SPLIT: val
+  LM_VAL_TASKS: ['t2m', 'm2t', 'mc']
 
 TEST:
   CHECKPOINTS: null
@@ -56,10 +57,16 @@ DATASET:
     FRAME_RATE: 20.0
     UNIT_LEN: 4
     STD_TEXT: False
+    DYNAMIC_TASK_SAMPLING: true
+    TRAIN_TASKS: ['t2m', 'm2t', 'mc']
+    TASK_SAMPLING:
+      t2m: 0.5
+      m2t: 0.2
+      mc: 0.3
   CODE_PATH: TOKENS_h2s_csl_phoenix
 
 METRIC:
-  TYPE: ['TM2TMetrics', 'M2TMetrics']
+  TYPE: ['TM2TMetrics', 'M2TMetrics', 'MCMetrics']
 
 LOSS:
   LAMBDA_FEATURE: 1.0

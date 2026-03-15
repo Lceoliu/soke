@@ -143,14 +143,21 @@ class SignLanguageTaskFormatter:
         sign_token_ids: Sequence[int],
         prefix_ratio: float = 0.5,
         min_prefix_tokens: int = 6,
+        group_size: int = 1,
     ):
         sign_token_ids = list(sign_token_ids)
+        group_size = max(int(group_size), 1)
         if len(sign_token_ids) < 2:
             prefix = sign_token_ids[:1]
             target = sign_token_ids[1:]
         else:
             split_idx = max(min_prefix_tokens, int(round(len(sign_token_ids) * prefix_ratio)))
             split_idx = min(max(split_idx, 1), len(sign_token_ids) - 1)
+            if group_size > 1:
+                split_idx = max(group_size, (split_idx // group_size) * group_size)
+                if split_idx >= len(sign_token_ids):
+                    split_idx = max(group_size, ((len(sign_token_ids) - 1) // group_size) * group_size)
+                split_idx = min(max(split_idx, group_size), len(sign_token_ids) - 1)
             prefix = sign_token_ids[:split_idx]
             target = sign_token_ids[split_idx:]
 
@@ -177,6 +184,7 @@ class SignLanguageTaskFormatter:
         texts: Sequence[str],
         sign_token_ids: Sequence[Sequence[int]],
         mc_prefix_ratio: float = 0.5,
+        mc_group_size: int = 1,
     ) -> CausalTaskBatch:
         if not (len(task_names) == len(texts) == len(sign_token_ids)):
             raise ValueError("task_names, texts, and sign_token_ids must have the same batch size.")
@@ -196,6 +204,7 @@ class SignLanguageTaskFormatter:
                 seq, lab, raw = self._build_mc_sample(
                     sign_token_ids=cur_sign_ids,
                     prefix_ratio=mc_prefix_ratio,
+                    group_size=mc_group_size,
                 )
                 task_name = "mc"
             else:
