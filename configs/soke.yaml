@@ -1,4 +1,4 @@
-NAME: SOKE_QWEN # Experiment names
+NAME: SOKE_QWEN_new # Experiment names
 USE_RAW_VIDEO: false  # 可视化时是否读取原始 RGB 视频（vis_mesh 使用）
 PRECISION: bf16-mixed
 ACCELERATOR: 'gpu' # Devices optioncal: “cpu”, “gpu”, “tpu”, “ipu”, “hpu”, “mps, “auto”
@@ -11,7 +11,7 @@ TRAIN:
   #---------------------------------
   NUM_WORKERS: 16 # Number of workers
   BATCH_SIZE: 4 # Size of batches
-  END_EPOCH: 150 # End epoch
+  END_EPOCH: 160 # End epoch
   RESUME: '' # Resume training from this path (empty for starting fresh)
   PRETRAINED: '' # Preatrained model path
   PRETRAINED_VAE: 'experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt' # Vae model path
