@@ -19,7 +19,13 @@ def main():
 
     # Logger
     logger = create_logger(cfg, phase="train")  # create logger
-    logger.info(OmegaConf.to_yaml(cfg))  # print config file
+    logger.info(
+        "Run config: "
+        f"NAME={cfg.NAME} "
+        f"STAGE={cfg.TRAIN.STAGE} "
+        f"VAL_EVERY_EPOCHS={cfg.LOGGER.VAL_EVERY_STEPS} "
+        f"EXP_DIR={cfg.FOLDER_EXP}"
+    )
 
     # Seed
     pl.seed_everything(cfg.SEED_VALUE)

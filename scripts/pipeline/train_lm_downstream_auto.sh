@@ -51,6 +51,9 @@ TRAIN_LOG=${TRAIN_LOG:-"$LOG_DIR/lm_train_${TS}.log"}
 BLEU_LOG=${BLEU_LOG:-"$LOG_DIR/lm_bleu_eval_${TS}.log"}
 T2M_TEST_LOG=${T2M_TEST_LOG:-"$LOG_DIR/lm_t2m_test_${TS}.log"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
+if [[ -z "${PYTHON_BIN//[[:space:]]/}" ]]; then
+  PYTHON_BIN=python3
+fi
 
 # Always run from repository root so local imports (mGPT, scripts, configs) work.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +80,14 @@ if [[ -n "$BATCH_SIZE" || -n "$END_EPOCH" || -n "$EXP_NAME" || -n "$PRETRAINED_V
   TMP_CFG="/tmp/soke_lm_train_${TS}.yaml"
   "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
-cfg = OmegaConf.load("$CFG")
+from mGPT.config import get_module_config
+
+cfg_assets = OmegaConf.load("./configs/assets.yaml")
+cfg_base = OmegaConf.load(f"{cfg_assets.CONFIG_FOLDER}/default.yaml")
+cfg_exp = OmegaConf.merge(cfg_base, OmegaConf.load("$CFG"))
+if not cfg_exp.FULL_CONFIG:
+    cfg_exp = get_module_config(cfg_exp, cfg_assets.CONFIG_FOLDER)
+cfg = OmegaConf.merge(cfg_exp, cfg_assets)
 if "$BATCH_SIZE":
     cfg.TRAIN.BATCH_SIZE = int("$BATCH_SIZE")
 if "$END_EPOCH":

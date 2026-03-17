@@ -65,6 +65,9 @@ TRAIN_LOG=${TRAIN_LOG:-"$LOG_DIR/qwen_train_${TS}.log"}
 BLEU_LOG=${BLEU_LOG:-"$LOG_DIR/qwen_bleu_eval_${TS}.log"}
 T2M_TEST_LOG=${T2M_TEST_LOG:-"$LOG_DIR/qwen_t2m_test_${TS}.log"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
+if [[ -z "${PYTHON_BIN//[[:space:]]/}" ]]; then
+  PYTHON_BIN=python3
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
