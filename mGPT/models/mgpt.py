@@ -951,9 +951,19 @@ class MotionGPT(BaseModel):
                 if split == "val":
                     rs_set_loss = self.train_lm_forward(batch, forced_task=eval_task)
                     cur_val_loss = rs_set_loss['outputs'].loss if hasattr(rs_set_loss['outputs'], "loss") else rs_set_loss['outputs']['loss']
+                    cur_val_loss = cur_val_loss.detach().float()
+                    cur_val_ppl = torch.exp(torch.clamp(cur_val_loss, max=20.0))
                     self.log(
                         f"val/{eval_task}_loss",
-                        cur_val_loss.detach().float(),
+                        cur_val_loss,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        sync_dist=True,
+                    )
+                    self.log(
+                        f"val/{eval_task}_ppl",
+                        cur_val_ppl,
                         on_step=False,
                         on_epoch=True,
                         prog_bar=False,

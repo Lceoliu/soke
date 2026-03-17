@@ -22,6 +22,16 @@ TRAIN:
       lr: 1e-4
       betas: [0.9, 0.99]
       weight_decay: 0.0
+    PARAM_GROUPS:
+      ENABLE_DIFF_LR: true
+      BACKBONE_LR_MULT: 1.0
+      EMBED_LR_MULT: 10.0
+      LM_HEAD_LR_MULT: 10.0
+      FAST_WARMUP:
+        ENABLED: false
+        START_FACTOR: 0.2
+        BASE_WARMUP_EPOCHS: 0
+        EMBED_LM_HEAD_WARMUP_EPOCHS: 2
   
   LR_SCHEDULER:
     target: CosineAnnealingLR
