@@ -11,9 +11,9 @@ fi
 
 NUM_SAMPLES=${NUM_SAMPLES:-12}
 SIGNER=${SIGNER:-P0000}
-SUBSET_ROOT=${SUBSET_ROOT:-data/CSL-Daily-overfit12}
+SUBSET_ROOT=${SUBSET_ROOT:-data/CSL-Daily-overfit${NUM_SAMPLES}}
 GPU_IDS=${GPU_IDS:-0}
-EXP_NAME=${EXP_NAME:-SOKE_QWEN_CSL_OVERFIT12_M2T}
+EXP_NAME=${EXP_NAME:-SOKE_QWEN_CSL_OVERFIT${NUM_SAMPLES}_M2T}
 PRETRAINED_VAE=${PRETRAINED_VAE:-experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt}
 
 python scripts/pipeline/prepare_csl_overfit_subset.py \
@@ -25,7 +25,7 @@ python scripts/pipeline/prepare_csl_overfit_subset.py \
 GPU_IDS="$GPU_IDS" \
 CFG=configs/soke_csl_overfit_m2t.yaml \
 EXP_NAME="$EXP_NAME" \
-PREPARE_TOKENS=0 \
+PREPARE_TOKENS=1 \
 TRAIN_LM=1 \
 AUTO_EVAL_BLEU=0 \
 AUTO_SHOW_M2T=0 \

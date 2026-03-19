@@ -35,4 +35,5 @@ MEAN_PATH="$SUBSET_ROOT/mean.pt" \
 STD_PATH="$SUBSET_ROOT/std.pt" \
 VIS_INPUT_FPS=50 \
 MESH_RY_DEG=-180 \
+VIS_CAM_Y=0 \
 bash scripts/pipeline/train_qwen_downstream_auto.sh

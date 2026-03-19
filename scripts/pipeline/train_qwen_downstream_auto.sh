@@ -49,6 +49,8 @@ AUTO_EVAL_BLEU=${AUTO_EVAL_BLEU:-1}
 AUTO_VIS=${AUTO_VIS:-1}
 AUTO_SHOW_M2T=${AUTO_SHOW_M2T:-1}
 AUTO_VIS_MC=${AUTO_VIS_MC:-1}
+SKIP_T2M_TEST_FOR_VIS=${SKIP_T2M_TEST_FOR_VIS:-0}
+SKIP_MC_TEST_FOR_VIS=${SKIP_MC_TEST_FOR_VIS:-0}
 
 # Eval / vis
 EVAL_GPU=${EVAL_GPU:-0}
@@ -357,7 +359,8 @@ fi
 if [[ "$AUTO_VIS" == "1" ]]; then
   echo "[5/5] Running t2m generation + mesh visualization ..."
   VIS_TEST_CFG="/tmp/soke_qwen_t2m_vis_${TS}.yaml"
-  "$PYTHON_BIN" - <<PY
+  if [[ "$SKIP_T2M_TEST_FOR_VIS" != "1" ]]; then
+    "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
 cfg = OmegaConf.load("$RUN_CFG")
 cfg.model.params.task = "t2m"
@@ -372,13 +375,16 @@ OmegaConf.save(cfg, "$VIS_TEST_CFG")
 print("saved", "$VIS_TEST_CFG")
 PY
 
-  "$PYTHON_BIN" test.py \
-    --cfg "$VIS_TEST_CFG" \
-    --nodebug \
-    --task t2m \
-    --use_gpus "$EVAL_GPU" \
-    --device 0 \
-    --batch_size "$EVAL_BATCH_SIZE" 2>&1 | tee "$T2M_TEST_LOG"
+    "$PYTHON_BIN" test.py \
+      --cfg "$VIS_TEST_CFG" \
+      --nodebug \
+      --task t2m \
+      --use_gpus "$EVAL_GPU" \
+      --device 0 \
+      --batch_size "$EVAL_BATCH_SIZE" 2>&1 | tee "$T2M_TEST_LOG"
+  else
+    echo "[5/5] Skipping t2m test generation before visualization."
+  fi
 
   VIS_ROOT="$EXP_DIR/auto_vis/${TS}"
   VIS_NPY_DIR="$VIS_ROOT/npy"
@@ -463,7 +469,8 @@ fi
 if [[ "$AUTO_VIS_MC" == "1" ]]; then
   echo "[mc] Running motion-continuation generation + mesh visualization ..."
   MC_TEST_CFG="/tmp/soke_qwen_mc_vis_${TS}.yaml"
-  "$PYTHON_BIN" - <<PY
+  if [[ "$SKIP_MC_TEST_FOR_VIS" != "1" ]]; then
+    "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
 cfg = OmegaConf.load("$RUN_CFG")
 cfg.model.params.task = "mc"
@@ -478,13 +485,16 @@ OmegaConf.save(cfg, "$MC_TEST_CFG")
 print("saved", "$MC_TEST_CFG")
 PY
 
-  "$PYTHON_BIN" test.py \
-    --cfg "$MC_TEST_CFG" \
-    --nodebug \
-    --task mc \
-    --use_gpus "$EVAL_GPU" \
-    --device 0 \
-    --batch_size "$EVAL_BATCH_SIZE" 2>&1 | tee "$MC_TEST_LOG"
+    "$PYTHON_BIN" test.py \
+      --cfg "$MC_TEST_CFG" \
+      --nodebug \
+      --task mc \
+      --use_gpus "$EVAL_GPU" \
+      --device 0 \
+      --batch_size "$EVAL_BATCH_SIZE" 2>&1 | tee "$MC_TEST_LOG"
+  else
+    echo "[mc] Skipping mc test generation before visualization."
+  fi
 
   MC_VIS_ROOT="$EXP_DIR/auto_vis_mc/${TS}"
   MC_VIS_NPY_DIR="$MC_VIS_ROOT/npy"

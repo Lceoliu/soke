@@ -16,3 +16,6 @@
 
 5. `docs/data_onboarding_guide_zh.md`  
    自定义数据接入指南：从视频+SMPL-X 到可训练数据目录。
+
+6. `docs/qwen_overfit_diagnosis_plan.md`  
+   Qwen 下游专项诊断：基于 overfit 实验定位 `t2m / m2t / mc` 问题来源的实验计划与 TODO 清单。

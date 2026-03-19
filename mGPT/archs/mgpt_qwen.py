@@ -4,6 +4,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 from torch import Tensor, nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
+except Exception:  # pragma: no cover
+    from transformers import LogitsProcessor, LogitsProcessorList
 
 from peft import LoraConfig, get_peft_model
 
@@ -12,6 +16,20 @@ from mGPT.archs.task_formatting import (
     add_missing_special_tokens,
     serialize_sign_tokens,
 )
+
+
+class AllowedTokensLogitsProcessor(LogitsProcessor):
+    def __init__(self, allowed_token_ids: Sequence[int]):
+        allowed = sorted({int(tok_id) for tok_id in allowed_token_ids})
+        if not allowed:
+            raise ValueError("Allowed token set is empty.")
+        self.allowed_token_ids = torch.tensor(allowed, dtype=torch.long)
+
+    def __call__(self, input_ids, scores):
+        allowed = self.allowed_token_ids.to(device=scores.device)
+        masked_scores = torch.full_like(scores, torch.finfo(scores.dtype).min)
+        masked_scores.index_fill_(1, allowed, 0.0)
+        return masked_scores
 
 
 class QwenCausalLM(nn.Module):
@@ -95,6 +113,7 @@ class QwenCausalLM(nn.Module):
             self._freeze_backbone_only()
 
         self._enable_embedding_and_lm_head_training()
+        self._allowed_token_cache: Dict[Tuple[str, int], List[int]] = {}
 
     @property
     def device(self):
@@ -222,6 +241,52 @@ class QwenCausalLM(nn.Module):
         rhand = motion_tokens[:, 2].long().tolist() if motion_tokens.shape[1] > 2 else None
         return self._build_sign_token_ids(body, lhand, rhand)
 
+    def _build_allowed_token_ids(self, task: str, stop_token_id: int) -> List[int]:
+        task = str(task).lower()
+        cache_key = (task, int(stop_token_id))
+        if cache_key in self._allowed_token_cache:
+            return self._allowed_token_cache[cache_key]
+
+        vocab = self.tokenizer.get_vocab()
+        all_special = set(getattr(self.tokenizer, "all_special_tokens", []) or [])
+        sign_prefixes = ("<motion_id_", "<hand_id_", "<rhand_id_")
+
+        if task in ["t2m", "mc", "pred", "continuation"]:
+            allowed = [
+                tok_id
+                for tok, tok_id in vocab.items()
+                if tok.startswith(sign_prefixes) or int(tok_id) == int(stop_token_id)
+            ]
+            # Keep only the stop token among special tokens.
+            allowed = [tok_id for tok_id in allowed if self.tokenizer.convert_ids_to_tokens(int(tok_id)) not in all_special or int(tok_id) == int(stop_token_id)]
+        elif task == "m2t":
+            allowed = [
+                tok_id
+                for tok, tok_id in vocab.items()
+                if not tok.startswith(sign_prefixes)
+                and tok not in all_special
+            ]
+            allowed.append(int(stop_token_id))
+        else:
+            raise NotImplementedError(f"Unsupported generation task: {task}")
+
+        allowed = sorted({int(tok_id) for tok_id in allowed})
+        if int(stop_token_id) not in allowed:
+            allowed.append(int(stop_token_id))
+        self._allowed_token_cache[cache_key] = allowed
+        return allowed
+
+    def _build_logits_processor(
+        self,
+        task: str,
+        stop_token_id: int,
+        apply_generation_mask: bool = True,
+    ) -> Optional[LogitsProcessorList]:
+        if not apply_generation_mask:
+            return None
+        allowed = self._build_allowed_token_ids(task, stop_token_id)
+        return LogitsProcessorList([AllowedTokensLogitsProcessor(allowed)])
+
     def forward(
         self,
         texts: List[str],
@@ -299,10 +364,17 @@ class QwenCausalLM(nn.Module):
         self,
         prompt_ids: torch.Tensor,
         stop_token_id: int,
+        task: str,
         do_sample: bool = False,
+        apply_generation_mask: bool = True,
     ) -> torch.Tensor:
         prompt_ids = prompt_ids.to(self.device)
         attention_mask = torch.ones_like(prompt_ids, device=self.device)
+        logits_processor = self._build_logits_processor(
+            task=task,
+            stop_token_id=stop_token_id,
+            apply_generation_mask=apply_generation_mask,
+        )
         generate_kwargs = dict(
             input_ids=prompt_ids,
             attention_mask=attention_mask,
@@ -312,6 +384,8 @@ class QwenCausalLM(nn.Module):
             do_sample=bool(do_sample),
             use_cache=True,
         )
+        if logits_processor is not None:
+            generate_kwargs["logits_processor"] = logits_processor
         outputs = self.language_model.generate(**generate_kwargs)
         return outputs[0]
 
@@ -322,13 +396,17 @@ class QwenCausalLM(nn.Module):
     def _parse_generated_sign_tokens(
         self,
         generated_ids: Sequence[int],
+        stop_token_ids: Optional[Sequence[int]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         body: List[int] = []
         lhand: List[int] = []
         rhand: List[int] = []
+        stop_token_set = {int(self.special_token_ids["</sign>"])}
+        if stop_token_ids is not None:
+            stop_token_set = {int(tok) for tok in stop_token_ids}
 
         for tok_id in generated_ids:
-            if int(tok_id) == int(self.special_token_ids["</sign>"]):
+            if int(tok_id) in stop_token_set:
                 break
             token = self.tokenizer.convert_ids_to_tokens(int(tok_id))
             if token.startswith("<motion_id_"):
@@ -373,6 +451,38 @@ class QwenCausalLM(nn.Module):
         text = self.tokenizer.decode(text_ids, skip_special_tokens=True)
         return text.strip()
 
+    def _build_generation_debug_row(
+        self,
+        task: str,
+        prompt_ids: torch.Tensor,
+        output_ids: torch.Tensor,
+        tail_ids: Sequence[int],
+        stop_token_id: int,
+        parsed_output,
+        apply_generation_mask: bool,
+    ) -> Dict[str, object]:
+        allowed = self._build_allowed_token_ids(task, stop_token_id) if apply_generation_mask else None
+        allowed_set = set(allowed or [])
+        disallowed_tail_ids = [int(tok_id) for tok_id in tail_ids if allowed is not None and int(tok_id) not in allowed_set]
+        stop_pos = -1
+        for idx, tok_id in enumerate(tail_ids):
+            if int(tok_id) == int(stop_token_id):
+                stop_pos = idx
+                break
+        return {
+            "task": str(task).lower(),
+            "prompt_len": int(prompt_ids.shape[1]),
+            "prompt_ids": prompt_ids.squeeze(0).tolist(),
+            "output_ids": output_ids.tolist(),
+            "tail_ids": list(map(int, tail_ids)),
+            "raw_tail_text": self.tokenizer.decode(list(map(int, tail_ids)), skip_special_tokens=False),
+            "stop_token_id": int(stop_token_id),
+            "stop_token_pos": int(stop_pos),
+            "disallowed_tail_ids": disallowed_tail_ids,
+            "parsed_output": parsed_output,
+            "mask_enabled": bool(apply_generation_mask),
+        }
+
     @torch.no_grad()
     def generate_conditional(
         self,
@@ -385,6 +495,8 @@ class QwenCausalLM(nn.Module):
         src: Optional[List[str]] = None,
         name: Optional[List[str]] = None,
         do_sample: bool = False,
+        apply_generation_mask: bool = True,
+        return_debug: bool = False,
     ):
         task = str(task).lower()
         if task == "t2m":
@@ -393,15 +505,21 @@ class QwenCausalLM(nn.Module):
             outputs_tokens = []
             outputs_tokens_hand = []
             outputs_tokens_rhand = []
+            debug_rows = []
             for text in texts:
                 prompt_ids = self._make_t2m_prompt(text)
                 output_ids = self._generate_ids(
                     prompt_ids,
                     stop_token_id=self.special_token_ids["</sign>"],
+                    task="t2m",
                     do_sample=do_sample,
+                    apply_generation_mask=apply_generation_mask,
                 )
                 tail_ids = self._extract_after_prompt(output_ids, prompt_ids.shape[1])
-                body, lhand, rhand = self._parse_generated_sign_tokens(tail_ids)
+                body, lhand, rhand = self._parse_generated_sign_tokens(
+                    tail_ids,
+                    stop_token_ids=[self.special_token_ids["</sign>"]],
+                )
                 outputs_tokens.append(body)
                 outputs_tokens_hand.append(
                     lhand if lhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
@@ -409,28 +527,66 @@ class QwenCausalLM(nn.Module):
                 outputs_tokens_rhand.append(
                     rhand if rhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
                 )
+                if return_debug:
+                    parsed_output = {
+                        "body": body.tolist(),
+                        "lhand": None if lhand is None else lhand.tolist(),
+                        "rhand": None if rhand is None else rhand.tolist(),
+                    }
+                    debug_rows.append(
+                        self._build_generation_debug_row(
+                            task="t2m",
+                            prompt_ids=prompt_ids,
+                            output_ids=output_ids,
+                            tail_ids=tail_ids,
+                            stop_token_id=self.special_token_ids["</sign>"],
+                            parsed_output=parsed_output,
+                            apply_generation_mask=apply_generation_mask,
+                        )
+                    )
             has_lhand = any(x.numel() > 0 for x in outputs_tokens_hand)
             has_rhand = any(x.numel() > 0 for x in outputs_tokens_rhand)
-            return {
+            result = {
                 "outputs_tokens": outputs_tokens,
                 "outputs_tokens_hand": outputs_tokens_hand if has_lhand else None,
                 "outputs_tokens_rhand": outputs_tokens_rhand if has_rhand else None,
             }
+            if return_debug:
+                result["debug_rows"] = debug_rows
+            return result
 
         if task == "m2t":
             if motion_tokens is None:
                 raise ValueError("motion_tokens must be provided for m2t generation.")
             outputs: List[str] = []
+            debug_rows = []
             for cur_tokens in motion_tokens:
                 sign_token_ids = self._motion_tensor_to_sign_token_ids(cur_tokens)
                 prompt_ids = self._make_m2t_prompt(sign_token_ids)
                 output_ids = self._generate_ids(
                     prompt_ids,
                     stop_token_id=self.special_token_ids["</text>"],
+                    task="m2t",
                     do_sample=do_sample,
+                    apply_generation_mask=apply_generation_mask,
                 )
                 tail_ids = self._extract_after_prompt(output_ids, prompt_ids.shape[1])
-                outputs.append(self._parse_generated_text(tail_ids, self.special_token_ids["</text>"]))
+                parsed_text = self._parse_generated_text(tail_ids, self.special_token_ids["</text>"])
+                outputs.append(parsed_text)
+                if return_debug:
+                    debug_rows.append(
+                        self._build_generation_debug_row(
+                            task="m2t",
+                            prompt_ids=prompt_ids,
+                            output_ids=output_ids,
+                            tail_ids=tail_ids,
+                            stop_token_id=self.special_token_ids["</text>"],
+                            parsed_output=parsed_text,
+                            apply_generation_mask=apply_generation_mask,
+                        )
+                    )
+            if return_debug:
+                return {"outputs": outputs, "debug_rows": debug_rows}
             return outputs
 
         if task in ["mc", "pred", "continuation"]:
@@ -439,16 +595,22 @@ class QwenCausalLM(nn.Module):
             outputs_tokens = []
             outputs_tokens_hand = []
             outputs_tokens_rhand = []
+            debug_rows = []
             for cur_tokens in motion_tokens:
                 sign_token_ids = self._motion_tensor_to_sign_token_ids(cur_tokens)
                 prompt_ids = self._make_mc_prompt(sign_token_ids)
                 output_ids = self._generate_ids(
                     prompt_ids,
                     stop_token_id=self.special_token_ids["</cont>"],
+                    task="mc",
                     do_sample=do_sample,
+                    apply_generation_mask=apply_generation_mask,
                 )
                 tail_ids = self._extract_after_prompt(output_ids, prompt_ids.shape[1])
-                body, lhand, rhand = self._parse_generated_sign_tokens(tail_ids)
+                body, lhand, rhand = self._parse_generated_sign_tokens(
+                    tail_ids,
+                    stop_token_ids=[self.special_token_ids["</sign>"], self.special_token_ids["</cont>"]],
+                )
                 outputs_tokens.append(body)
                 outputs_tokens_hand.append(
                     lhand if lhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
@@ -456,13 +618,33 @@ class QwenCausalLM(nn.Module):
                 outputs_tokens_rhand.append(
                     rhand if rhand is not None else torch.zeros(0, dtype=torch.long, device=self.device)
                 )
+                if return_debug:
+                    parsed_output = {
+                        "body": body.tolist(),
+                        "lhand": None if lhand is None else lhand.tolist(),
+                        "rhand": None if rhand is None else rhand.tolist(),
+                    }
+                    debug_rows.append(
+                        self._build_generation_debug_row(
+                            task="mc",
+                            prompt_ids=prompt_ids,
+                            output_ids=output_ids,
+                            tail_ids=tail_ids,
+                            stop_token_id=self.special_token_ids["</cont>"],
+                            parsed_output=parsed_output,
+                            apply_generation_mask=apply_generation_mask,
+                        )
+                    )
             has_lhand = any(x.numel() > 0 for x in outputs_tokens_hand)
             has_rhand = any(x.numel() > 0 for x in outputs_tokens_rhand)
-            return {
+            result = {
                 "outputs_tokens": outputs_tokens,
                 "outputs_tokens_hand": outputs_tokens_hand if has_lhand else None,
                 "outputs_tokens_rhand": outputs_tokens_rhand if has_rhand else None,
             }
+            if return_debug:
+                result["debug_rows"] = debug_rows
+            return result
 
         raise NotImplementedError(f"Unsupported generation task: {task}")
 
