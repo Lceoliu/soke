@@ -105,6 +105,29 @@
 
 下面的 TODO 不是泛泛建议，而是必须按顺序执行的定位实验。
 
+### 5.0 执行约定
+
+以下命令默认在项目根目录执行，并默认使用 `soke` 环境：
+
+```bash
+cd /home/SOKE
+source /opt/conda/etc/profile.d/conda.sh
+conda activate soke
+```
+
+为了避免 overfit 诊断被自动后处理干扰，下列训练命令默认都关闭：
+- `AUTO_SHOW_M2T=0`
+- `AUTO_VIS=0`
+- `AUTO_VIS_MC=0`
+
+迁移到 H20 后，优先保持：
+- `BATCH_SIZE=8`
+- `NUM_WORKERS=2`
+
+如果只是 smoke，可先把：
+- `END_EPOCH=50`
+确认链路通了再升到 `200`。
+
 ### TODO 1：做 `overfit1` 最小验证
 - 目标：
   - 确认 `t2m-only` 和 `m2t-only` 是否能记住单条样本。
@@ -122,6 +145,30 @@
 - 输出：
   - `experiments/mgpt_overfit/<EXP_NAME>/`
   - 单条样本的生成结果对比
+
+推荐命令：
+
+`t2m overfit1`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && GPU_IDS=0 NUM_SAMPLES=1 SIGNER=P0000 EXP_NAME=SOKE_QWEN_CSL_OVERFIT1_T2M END_EPOCH=200 BATCH_SIZE=8 NUM_WORKERS=2 PRETRAINED_VAE=experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt AUTO_SHOW_M2T=0 AUTO_VIS=0 AUTO_VIS_MC=0 bash scripts/pipeline/train_qwen_csl_overfit_t2m.sh
+```
+
+`m2t overfit1`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && GPU_IDS=0 NUM_SAMPLES=1 SIGNER=P0000 EXP_NAME=SOKE_QWEN_CSL_OVERFIT1_M2T END_EPOCH=200 BATCH_SIZE=8 NUM_WORKERS=2 PRETRAINED_VAE=experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt AUTO_SHOW_M2T=0 AUTO_VIS=0 AUTO_VIS_MC=0 bash scripts/pipeline/train_qwen_csl_overfit_m2t.sh
+```
+
+扩展命令：
+
+`t2m overfit4`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && GPU_IDS=0 NUM_SAMPLES=4 SIGNER=P0000 EXP_NAME=SOKE_QWEN_CSL_OVERFIT4_T2M END_EPOCH=200 BATCH_SIZE=8 NUM_WORKERS=2 PRETRAINED_VAE=experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt AUTO_SHOW_M2T=0 AUTO_VIS=0 AUTO_VIS_MC=0 bash scripts/pipeline/train_qwen_csl_overfit_t2m.sh
+```
+
+`m2t overfit4`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && GPU_IDS=0 NUM_SAMPLES=4 SIGNER=P0000 EXP_NAME=SOKE_QWEN_CSL_OVERFIT4_M2T END_EPOCH=200 BATCH_SIZE=8 NUM_WORKERS=2 PRETRAINED_VAE=experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt AUTO_SHOW_M2T=0 AUTO_VIS=0 AUTO_VIS_MC=0 bash scripts/pipeline/train_qwen_csl_overfit_m2t.sh
+```
 
 ### TODO 2：补 teacher-forced token accuracy 检查
 - 目标：
@@ -143,6 +190,18 @@
   - 每个样本的 token accuracy
   - 按任务汇总的平均 accuracy
 
+推荐命令：
+
+`t2m teacher-forced / free-run 诊断`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/diagnose_qwen_overfit.py --cfg configs/soke_csl_overfit_t2m.yaml --ckpt experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_T2M/checkpoints/last.ckpt --split train --task t2m --num_examples 1 --batch_size 1 --use_gpus 0 --device 0
+```
+
+`m2t teacher-forced / free-run 诊断`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/diagnose_qwen_overfit.py --cfg configs/soke_csl_overfit_m2t.yaml --ckpt experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_M2T/checkpoints/last.ckpt --split train --task m2t --num_examples 1 --batch_size 1 --use_gpus 0 --device 0
+```
+
 ### TODO 3：补 free-run exact match 与 divergence point 检查
 - 目标：
   - 找出生成序列从哪个 token 开始偏离 GT。
@@ -162,6 +221,13 @@
   - 前缀正确后漂移：优先怀疑 stop rule / output space / exposure bias
 - 输出：
   - 每个样本的 divergence report
+
+说明：
+- 当前由 `scripts/analysis/diagnose_qwen_overfit.py` 一并导出：
+  - `teacher_forced_token_acc`
+  - `free_run_exact_match`
+  - `first_divergence_index`
+- 推荐先对 `overfit1` 跑，再对 `overfit4` 跑。
 
 ### TODO 4：严格核对训练 prompt 与推理 prompt
 - 目标：
@@ -187,6 +253,18 @@
 - 输出：
   - `prompt_parity_report.md`
 
+推荐命令：
+
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/export_prompt_parity_report.py --cfg configs/soke_csl_overfit_t2m.yaml --split train --tasks t2m,m2t --num_examples 20 --output_dir /tmp/qwen_prompt_parity
+```
+
+正式训练配置也可以直接检查：
+
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/export_prompt_parity_report.py --cfg configs/soke.yaml --split train --tasks t2m,m2t --num_examples 20 --output_dir /tmp/qwen_prompt_parity_full
+```
+
 ### TODO 5：为 `t2m / m2t / mc` 添加 generation-time vocab mask
 - 目标：
   - 避免 unified vocab 下的错误子空间污染。
@@ -210,6 +288,22 @@
 - 输出：
   - mask 前后对比结果
 
+当前状态：
+- 已实现到 `mGPT/archs/mgpt_qwen.py`
+- 可通过诊断脚本比较 masked vs unmasked
+
+推荐命令：
+
+`t2m mask 诊断`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/inspect_qwen_generation_diagnostics.py --cfg experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_T2M/config_*.yaml --ckpt experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_T2M/checkpoints/last.ckpt --task t2m --split test --num_examples 1 --compare_unmasked --output_jsonl /tmp/qwen_t2m_diag.jsonl
+```
+
+`m2t mask 诊断`
+```bash
+cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke && python scripts/analysis/inspect_qwen_generation_diagnostics.py --cfg experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_M2T/config_*.yaml --ckpt experiments/mgpt/SOKE_QWEN_CSL_OVERFIT1_M2T/checkpoints/last.ckpt --task m2t --split test --num_examples 1 --compare_unmasked --output_jsonl /tmp/qwen_m2t_diag.jsonl
+```
+
 ### TODO 6：核对 stop token、`max_new_tokens` 与 parse 逻辑
 - 目标：
   - 排除“模型其实生成对了，但被截断/裁坏”的情况。
@@ -228,6 +322,14 @@
   - 若原始输出正确、parse 后错误，则问题完全在后处理。
 - 输出：
   - raw generation vs parsed generation 对照
+
+说明：
+- 当前由 `scripts/analysis/inspect_qwen_generation_diagnostics.py` 一并完成。
+- 重点看输出字段：
+  - `raw_tail_text`
+  - `parsed_output`
+  - `stop_token_pos`
+  - `disallowed_tail_ids`
 
 ### TODO 7：做 sign token 可分性分析的强化版
 - 目标：
@@ -251,6 +353,16 @@
   - 热力图
   - retrieval summary
 
+当前已有基础结果位置：
+- `experiments/mgpt/SOKE_QWEN_CSL_OVERFIT12/analysis_sign_tokens/`
+
+建议执行顺序：
+1. 先完成 TODO 1-6
+2. 再回到 `overfit12` 做 token 可分性强化分析
+
+备注：
+- 当前这一项还没有专门的一键脚本，需要在现有基础统计上继续扩展 `1-NN retrieval / token edit distance / DTW`。
+
 ### TODO 8：测 VAE ceiling，分离“LM 问题”与“tokenizer 上限”
 - 目标：
   - 为 `t2m` 建立理论上限。
@@ -268,6 +380,15 @@
   - 如果距离很大，说明 LM 还没学到。
 - 输出：
   - `vae_ceiling_vs_t2m.md`
+
+建议实验内容：
+1. 对 `overfit12` 的 GT pose 运行：
+   - `pose -> tokenize -> reconstruct`
+2. 记录对应的重建误差和可视化
+3. 再与 `t2m-only overfit12` 的结果对比
+
+备注：
+- 当前没有单独的一键命令，建议在 TODO 1-6 完成后实现专门脚本，避免现在同时改动太多变量。
 
 ### TODO 9：检查新增 token 的梯度与更新幅度
 - 目标：
@@ -289,6 +410,11 @@
 - 输出：
   - 梯度统计表
 
+备注：
+- 这是第二阶段定位项。
+- 只有在 TODO 1-6 完成后仍然异常时，才值得继续做。
+- 当前尚未实现独立脚本。
+
 ### TODO 10：从 `overfit1 -> overfit4 -> overfit12` 做阶梯实验
 - 目标：
   - 判断失败是“完全不会”还是“规模一上来就退化”。
@@ -307,6 +433,14 @@
   - `1` 条就失败：优先怀疑实现错误
 - 输出：
   - `overfit_scaling_report.md`
+
+推荐执行顺序：
+
+1. `t2m overfit1`
+2. `m2t overfit1`
+3. `t2m overfit4`
+4. `m2t overfit4`
+5. 如前四步通过，再回到 `overfit12`
 
 ## 6. 推荐执行顺序
 
