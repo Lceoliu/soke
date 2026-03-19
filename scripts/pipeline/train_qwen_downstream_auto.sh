@@ -47,6 +47,8 @@ FORCE_RETOKENIZE=${FORCE_RETOKENIZE:-0}
 TRAIN_LM=${TRAIN_LM:-1}
 AUTO_EVAL_BLEU=${AUTO_EVAL_BLEU:-1}
 AUTO_VIS=${AUTO_VIS:-1}
+AUTO_SHOW_M2T=${AUTO_SHOW_M2T:-1}
+AUTO_VIS_MC=${AUTO_VIS_MC:-1}
 
 # Eval / vis
 EVAL_GPU=${EVAL_GPU:-0}
@@ -56,6 +58,8 @@ VIS_SPLIT=${VIS_SPLIT:-test}
 VIS_NUM_SAMPLES=${VIS_NUM_SAMPLES:-6}
 VIS_CAM_Y=${VIS_CAM_Y:--0.5}
 VIS_INPUT_FPS=${VIS_INPUT_FPS:-20}
+VIS_MESH_RX_DEG=${VIS_MESH_RX_DEG:-180}
+MESH_RY_DEG=${MESH_RY_DEG:-0}
 EVAL_CKPT=${EVAL_CKPT:-""}
 
 LOG_DIR=${LOG_DIR:-"logs"}
@@ -64,6 +68,8 @@ TS=$(date +%Y%m%d_%H%M%S)
 TRAIN_LOG=${TRAIN_LOG:-"$LOG_DIR/qwen_train_${TS}.log"}
 BLEU_LOG=${BLEU_LOG:-"$LOG_DIR/qwen_bleu_eval_${TS}.log"}
 T2M_TEST_LOG=${T2M_TEST_LOG:-"$LOG_DIR/qwen_t2m_test_${TS}.log"}
+MC_TEST_LOG=${MC_TEST_LOG:-"$LOG_DIR/qwen_mc_test_${TS}.log"}
+M2T_SHOW_LOG=${M2T_SHOW_LOG:-"$LOG_DIR/qwen_m2t_show_${TS}.log"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 if [[ -z "${PYTHON_BIN//[[:space:]]/}" ]]; then
   PYTHON_BIN=python3
@@ -327,14 +333,35 @@ PY
   } > "$EXP_DIR/auto_reports/downstream/bleu_eval_summary.txt"
 fi
 
+if [[ "$AUTO_SHOW_M2T" == "1" ]]; then
+  echo "[4/5] Exporting m2t qualitative examples ..."
+  M2T_JSONL="$EXP_DIR/auto_reports/downstream/m2t_examples_${EVAL_SPLIT}.jsonl"
+  "$PYTHON_BIN" scripts/analysis/inspect_m2t_predictions.py \
+    --cfg "$RUN_CFG" \
+    --ckpt "$EVAL_CKPT" \
+    --split "$EVAL_SPLIT" \
+    --batch_size "$EVAL_BATCH_SIZE" \
+    --num_examples "$VIS_NUM_SAMPLES" \
+    --use_gpus "$EVAL_GPU" \
+    --device 0 \
+    --output_jsonl "$M2T_JSONL" 2>&1 | tee "$M2T_SHOW_LOG"
+
+  {
+    echo "checkpoint: $EVAL_CKPT"
+    echo "eval_split: $EVAL_SPLIT"
+    echo "jsonl: $M2T_JSONL"
+    echo "log: $M2T_SHOW_LOG"
+  } > "$EXP_DIR/auto_reports/downstream/m2t_examples_summary.txt"
+fi
+
 if [[ "$AUTO_VIS" == "1" ]]; then
-  echo "[4/4] Running t2m generation + mesh visualization ..."
+  echo "[5/5] Running t2m generation + mesh visualization ..."
   VIS_TEST_CFG="/tmp/soke_qwen_t2m_vis_${TS}.yaml"
   "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
 cfg = OmegaConf.load("$RUN_CFG")
 cfg.model.params.task = "t2m"
-cfg.METRIC.TYPE = ["TM2TMetrics"]
+cfg.METRIC.TYPE = []
 cfg.TEST.CHECKPOINTS = "$EVAL_CKPT"
 cfg.TEST.SPLIT = "$VIS_SPLIT"
 cfg.TEST.BATCH_SIZE = int("$EVAL_BATCH_SIZE")
@@ -416,6 +443,8 @@ PY
         --std_path "$VIS_STD_PATH" \
         --cam_y "$VIS_CAM_Y" \
         --input_fps "$VIS_INPUT_FPS" \
+        --mesh_rx_deg "$VIS_MESH_RX_DEG" \
+        --mesh_ry_deg "$MESH_RY_DEG" \
         --output_dir "$VIS_VIDEO_DIR" \
         --sample_name="$sample_name" || true
     done < "$MANIFEST"
@@ -431,8 +460,116 @@ PY
   } > "$EXP_DIR/auto_reports/downstream/visualization_summary.txt"
 fi
 
+if [[ "$AUTO_VIS_MC" == "1" ]]; then
+  echo "[mc] Running motion-continuation generation + mesh visualization ..."
+  MC_TEST_CFG="/tmp/soke_qwen_mc_vis_${TS}.yaml"
+  "$PYTHON_BIN" - <<PY
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("$RUN_CFG")
+cfg.model.params.task = "mc"
+cfg.METRIC.TYPE = []
+cfg.TEST.CHECKPOINTS = "$EVAL_CKPT"
+cfg.TEST.SPLIT = "$VIS_SPLIT"
+cfg.TEST.BATCH_SIZE = int("$EVAL_BATCH_SIZE")
+cfg.TEST.REPLICATION_TIMES = 1
+cfg.TEST.SAVE_PREDICTIONS = True
+cfg.EVAL.BATCH_SIZE = int("$EVAL_BATCH_SIZE")
+OmegaConf.save(cfg, "$MC_TEST_CFG")
+print("saved", "$MC_TEST_CFG")
+PY
+
+  "$PYTHON_BIN" test.py \
+    --cfg "$MC_TEST_CFG" \
+    --nodebug \
+    --task mc \
+    --use_gpus "$EVAL_GPU" \
+    --device 0 \
+    --batch_size "$EVAL_BATCH_SIZE" 2>&1 | tee "$MC_TEST_LOG"
+
+  MC_VIS_ROOT="$EXP_DIR/auto_vis_mc/${TS}"
+  MC_VIS_NPY_DIR="$MC_VIS_ROOT/npy"
+  MC_VIS_VIDEO_DIR="$MC_VIS_ROOT/videos"
+  mkdir -p "$MC_VIS_NPY_DIR" "$MC_VIS_VIDEO_DIR"
+
+  MC_PRED_ROOT="results/mgpt/$(basename "$EXP_DIR")"
+  "$PYTHON_BIN" - <<PY
+import glob, os, pickle, numpy as np
+pred_root = "$MC_PRED_ROOT"
+split = "$VIS_SPLIT"
+out_dir = "$MC_VIS_NPY_DIR"
+k = int("$VIS_NUM_SAMPLES")
+rank_dirs = sorted(glob.glob(os.path.join(pred_root, f"{split}_rank_*")))
+pkls = []
+for d in rank_dirs:
+    pkls.extend(sorted(glob.glob(os.path.join(d, "*.pkl"))))
+if not pkls:
+    raise SystemExit(f"No prediction pkl found under {pred_root}/{split}_rank_*")
+selected = pkls[:k]
+os.makedirs(out_dir, exist_ok=True)
+manifest = []
+for p in selected:
+    name = os.path.splitext(os.path.basename(p))[0]
+    with open(p, "rb") as f:
+        item = pickle.load(f)
+    for tag, key in [("pred", "feats_rst"), ("gt", "feats_ref")]:
+        arr = np.asarray(item[key], dtype=np.float32)
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[0]
+        save_p = os.path.join(out_dir, f"{name}_{tag}.npy")
+        np.save(save_p, arr)
+        manifest.append(save_p)
+mf = os.path.join(out_dir, "manifest.txt")
+with open(mf, "w") as f:
+    for p in manifest:
+        f.write(p + "\\n")
+print("manifest", mf)
+PY
+
+  MC_MANIFEST="$MC_VIS_NPY_DIR/manifest.txt"
+  MC_VIS_MEAN_PATH=$($PYTHON_BIN - <<PY
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("$RUN_CFG")
+print(cfg.DATASET.H2S.MEAN_PATH)
+PY
+)
+  MC_VIS_STD_PATH=$($PYTHON_BIN - <<PY
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("$RUN_CFG")
+print(cfg.DATASET.H2S.STD_PATH)
+PY
+)
+  if [[ -f "$MC_MANIFEST" ]]; then
+    while IFS= read -r npy_path; do
+      [[ -z "$npy_path" ]] && continue
+      sample_name=$(basename "$npy_path" .npy)
+      "$PYTHON_BIN" scripts/visualize_smplx_raw_mesh.py \
+        --pose_npy "$npy_path" \
+        --input_type feat133_norm \
+        --mean_path "$MC_VIS_MEAN_PATH" \
+        --std_path "$MC_VIS_STD_PATH" \
+        --cam_y "$VIS_CAM_Y" \
+        --input_fps "$VIS_INPUT_FPS" \
+        --mesh_rx_deg "$VIS_MESH_RX_DEG" \
+        --mesh_ry_deg "$MESH_RY_DEG" \
+        --output_dir "$MC_VIS_VIDEO_DIR" \
+        --sample_name="$sample_name" || true
+    done < "$MC_MANIFEST"
+  fi
+
+  {
+    echo "checkpoint: $EVAL_CKPT"
+    echo "vis_split: $VIS_SPLIT"
+    echo "pred_root: $MC_PRED_ROOT"
+    echo "npy_dir: $MC_VIS_NPY_DIR"
+    echo "video_dir: $MC_VIS_VIDEO_DIR"
+    echo "test_log: $MC_TEST_LOG"
+  } > "$EXP_DIR/auto_reports/downstream/mc_visualization_summary.txt"
+fi
+
 echo "[done] Qwen downstream pipeline finished"
 echo "  exp_dir: $EXP_DIR"
 echo "  ckpt:    $EVAL_CKPT"
 echo "  bleu:    $EXP_DIR/auto_reports/downstream/bleu_eval_summary.txt"
 echo "  vis:     $EXP_DIR/auto_reports/downstream/visualization_summary.txt"
+echo "  m2t:     $EXP_DIR/auto_reports/downstream/m2t_examples_summary.txt"
+echo "  mc_vis:  $EXP_DIR/auto_reports/downstream/mc_visualization_summary.txt"

@@ -88,9 +88,9 @@ def parse_args():
     parser.add_argument("--height", type=int, default=512, help="Output height.")
     parser.add_argument("--focal", type=float, default=5000.0, help="Camera focal length.")
     parser.add_argument("--cam_x", type=float, default=-0.0026177440)
-    parser.add_argument("--cam_y", type=float, default=0.1)
+    parser.add_argument("--cam_y", type=float, default=-0.5)
     parser.add_argument("--cam_z", type=float, default=-13.0)
-    parser.add_argument("--mesh_rx_deg", type=float, default=0.0, help="Extra mesh rotation around X in degrees.")
+    parser.add_argument("--mesh_rx_deg", type=float, default=180.0, help="Extra mesh rotation around X in degrees.")
     parser.add_argument("--mesh_ry_deg", type=float, default=0.0, help="Extra mesh rotation around Y in degrees.")
     parser.add_argument("--mesh_rz_deg", type=float, default=0.0, help="Extra mesh rotation around Z in degrees.")
     parser.add_argument("--raw_video", type=str, default=None, help="Optional raw video path for side-by-side comparison.")
@@ -395,8 +395,11 @@ def main():
         sample_name = args.sample_name or Path(args.pose_npy).stem
 
     arr = maybe_resample(arr, input_fps=args.input_fps, max_frames=args.max_frames)
-    if len(arr) < 2:
-        raise ValueError(f"Too few frames after sampling: {len(arr)}")
+    if len(arr) == 0:
+        raise ValueError("No frames remain after sampling.")
+    if len(arr) == 1:
+        # Renderers / video muxers behave poorly on single-frame clips; duplicate once.
+        arr = np.concatenate([arr, arr], axis=0)
 
     mean133 = std133 = None
     if mode == "feat133_norm":

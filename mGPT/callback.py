@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoint
 
@@ -13,6 +14,7 @@ def build_callbacks(cfg, logger=None, phase='test', **kwargs):
 
     # Checkpoint Callback
     if phase == 'train':
+        callbacks.append(FinalCheckpointCallback())
         callbacks.extend(getCheckpointCallback(cfg, logger=logger, **kwargs))
         
     return callbacks
@@ -99,17 +101,18 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
     # })
     # callbacks.append(ModelCheckpoint(**checkpointParams))
 
+    checkpoint_dir = os.path.join(cfg.FOLDER_EXP, "checkpoints")
+
     checkpointParams = {
-        'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+        'dirpath': checkpoint_dir,
         'filename': "{epoch}",
         'monitor': "step",
         'mode': "max",
         'every_n_epochs': None,  #cfg.LOGGER.VAL_EVERY_STEPS,
         'save_top_k': 1,
-        'save_last': True, #None,
+        'save_last': True,
         'save_on_train_epoch_end': False
     }
-    # callbacks.append(ModelCheckpoint(**checkpointParams))
 
     # Only VAE stage logs `total/val`. LM validation is metric-only and does not
     # produce a validation loss scalar, so monitoring `total/val` there would crash.
@@ -385,3 +388,10 @@ class progressLogger(Callback):
 
         self.logger.info(line)
         self._train_epoch_start_time = None
+
+
+class FinalCheckpointCallback(Callback):
+    def on_train_end(self, trainer: Trainer, pl_module: LightningModule, **kwargs) -> None:
+        ckpt_dir = Path(trainer.default_root_dir) / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        trainer.save_checkpoint(str(ckpt_dir / "last.ckpt"), weights_only=False)

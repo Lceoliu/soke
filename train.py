@@ -81,12 +81,16 @@ def main():
         num_sanity_val_steps=int(cfg.TRAIN.get("NUM_SANITY_VAL_STEPS", 0)),
         accumulate_grad_batches=int(cfg.TRAIN.get("ACCUMULATE_GRAD_BATCHES", 1)),
     )
+    if bool(cfg.EVAL.get("DISABLE_VAL", False)):
+        trainer_kwargs["limit_val_batches"] = 0
+        trainer_kwargs["num_sanity_val_steps"] = 0
     if cfg.PRECISION is not None:
         trainer_kwargs["precision"] = cfg.PRECISION
 
     trainer = pl.Trainer(**trainer_kwargs)
     logger.info("Trainer initialized")
     logger.info(f"DDP find_unused_parameters={find_unused if len(cfg.DEVICE) > 1 else 'auto'}")
+    logger.info(f"Validation enabled={not bool(cfg.EVAL.get('DISABLE_VAL', False))}")
 
     # Strict load pretrianed model
     # 只在非RESUME模式下加载，RESUME时由trainer.fit自动加载

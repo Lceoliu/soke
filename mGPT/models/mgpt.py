@@ -953,6 +953,7 @@ class MotionGPT(BaseModel):
                     cur_val_loss = rs_set_loss['outputs'].loss if hasattr(rs_set_loss['outputs'], "loss") else rs_set_loss['outputs']['loss']
                     cur_val_loss = cur_val_loss.detach().float()
                     cur_val_ppl = torch.exp(torch.clamp(cur_val_loss, max=20.0))
+                    batch_size = int(lengths.shape[0]) if hasattr(lengths, "shape") else int(len(lengths))
                     self.log(
                         f"val/{eval_task}_loss",
                         cur_val_loss,
@@ -960,6 +961,7 @@ class MotionGPT(BaseModel):
                         on_epoch=True,
                         prog_bar=False,
                         sync_dist=True,
+                        batch_size=batch_size,
                     )
                     self.log(
                         f"val/{eval_task}_ppl",
@@ -968,46 +970,50 @@ class MotionGPT(BaseModel):
                         on_epoch=True,
                         prog_bar=False,
                         sync_dist=True,
+                        batch_size=batch_size,
                     )
 
                 if eval_task == "t2m":
                     rs_set = self.val_t2m_forward(batch)
-                    getattr(self.metrics, 'TM2TMetrics').update(
-                        feats_rst=rs_set["m_rst"],
-                        feats_ref=rs_set["m_ref"],
-                        joints_rst=rs_set["joints_rst"],
-                        joints_ref=rs_set["joints_ref"],
-                        vertices_rst=rs_set["vertices_rst"],
-                        vertices_ref=rs_set["vertices_ref"],
-                        lengths=lengths,
-                        lengths_rst=rs_set['lengths_rst'],
-                        split=split,
-                        src=src,
-                        name=name
-                    )
+                    if hasattr(self.metrics, 'TM2TMetrics'):
+                        getattr(self.metrics, 'TM2TMetrics').update(
+                            feats_rst=rs_set["m_rst"],
+                            feats_ref=rs_set["m_ref"],
+                            joints_rst=rs_set["joints_rst"],
+                            joints_ref=rs_set["joints_ref"],
+                            vertices_rst=rs_set["vertices_rst"],
+                            vertices_ref=rs_set["vertices_ref"],
+                            lengths=lengths,
+                            lengths_rst=rs_set['lengths_rst'],
+                            split=split,
+                            src=src,
+                            name=name
+                        )
                 elif eval_task == "m2t":
                     rs_set_m2t = self.val_m2t_forward(batch)
-                    getattr(self.metrics, 'M2TMetrics').update(
-                        pred_texts=rs_set_m2t["t_pred"],
-                        gt_texts=rs_set_m2t["t_ref"],
-                        lengths=rs_set_m2t['length'],
-                        src=src,
-                    )
+                    if hasattr(self.metrics, 'M2TMetrics'):
+                        getattr(self.metrics, 'M2TMetrics').update(
+                            pred_texts=rs_set_m2t["t_pred"],
+                            gt_texts=rs_set_m2t["t_ref"],
+                            lengths=rs_set_m2t['length'],
+                            src=src,
+                        )
                 elif eval_task == "mc":
                     rs_set_mc = self.val_mc_forward(batch)
-                    getattr(self.metrics, 'MCMetrics').update(
-                        feats_rst=rs_set_mc["m_rst"],
-                        feats_ref=rs_set_mc["m_ref"],
-                        joints_rst=rs_set_mc["joints_rst"],
-                        joints_ref=rs_set_mc["joints_ref"],
-                        vertices_rst=rs_set_mc["vertices_rst"],
-                        vertices_ref=rs_set_mc["vertices_ref"],
-                        lengths=rs_set_mc["length"],
-                        lengths_rst=rs_set_mc['lengths_rst'],
-                        split=split,
-                        src=src,
-                        name=name
-                    )
+                    if hasattr(self.metrics, 'MCMetrics'):
+                        getattr(self.metrics, 'MCMetrics').update(
+                            feats_rst=rs_set_mc["m_rst"],
+                            feats_ref=rs_set_mc["m_ref"],
+                            joints_rst=rs_set_mc["joints_rst"],
+                            joints_ref=rs_set_mc["joints_ref"],
+                            vertices_rst=rs_set_mc["vertices_rst"],
+                            vertices_ref=rs_set_mc["vertices_ref"],
+                            lengths=rs_set_mc["length"],
+                            lengths_rst=rs_set_mc['lengths_rst'],
+                            split=split,
+                            src=src,
+                            name=name
+                        )
                 # elif self.hparams.task in ["m2m", "pred", "inbetween"]:
                 #     rs_set = self.val_m2m_forward(batch, self.hparams.task)
 
@@ -1073,9 +1079,8 @@ class MotionGPT(BaseModel):
                 # return rs_set["joints_rst"], rs_set["joints_ref"], rs_set["vertices_rst"], rs_set["vertices_ref"], rs_set["m_ref"], rs_set["m_rst"], batch["length"]
                 return {'name': name, 'feats_ref': rs_set["m_ref"], 'feats_rst': rs_set['m_rst'], 'lengths': batch['length'], 'lengths_rst': batch['length'], 'text': batch_text}
             elif "lm" in self.hparams.stage:
-                # return rs_set["joints_rst"], rs_set["joints_ref"], rs_set["vertices_rst"], rs_set["vertices_ref"], rs_set["m_ref"], rs_set["m_rst"], \
-                # rs_set_m2t["t_pred"], rs_set_m2t["t_ref"], batch["length"]
-                if self.hparams.task == "m2t":
+                task_name = str(self.hparams.task).lower()
+                if task_name == "m2t":
                     # `test_step` expects motion-like tensors for optional dumping.
                     # For m2t evaluation, generated text is already consumed by metrics,
                     # so we return references as placeholders to keep the interface stable.
@@ -1087,7 +1092,23 @@ class MotionGPT(BaseModel):
                         'lengths_rst': batch['length'],
                         'text': batch_text,
                     }
-                return {'name': name, 'feats_ref': rs_set["m_ref"], 'feats_rst': rs_set['m_rst'], 'lengths': batch['length'], 'lengths_rst': rs_set['lengths_rst'], 'text': batch_text}
+                if task_name == "mc":
+                    return {
+                        'name': name,
+                        'feats_ref': rs_set_mc["m_ref"],
+                        'feats_rst': rs_set_mc['m_rst'],
+                        'lengths': rs_set_mc['length'],
+                        'lengths_rst': rs_set_mc['lengths_rst'],
+                        'text': batch_text,
+                    }
+                return {
+                    'name': name,
+                    'feats_ref': rs_set["m_ref"],
+                    'feats_rst': rs_set['m_rst'],
+                    'lengths': batch['length'],
+                    'lengths_rst': rs_set['lengths_rst'],
+                    'text': batch_text,
+                }
                
         return loss
 
