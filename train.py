@@ -59,8 +59,9 @@ def main():
         if "DDP_FIND_UNUSED_PARAMETERS" in cfg.TRAIN:
             find_unused = bool(cfg.TRAIN.DDP_FIND_UNUSED_PARAMETERS)
         else:
-            # VAE stage usually uses all params and can save memory with find_unused_parameters=False.
-            find_unused = False if str(cfg.TRAIN.STAGE) == "vae" else True
+            # Current VAE and LM paths use all trainable parameters in the forward pass.
+            # Keeping find_unused_parameters=False avoids expensive per-iteration graph scans.
+            find_unused = False
         strategy = f"ddp_find_unused_parameters_{str(find_unused).lower()}"
     else:
         strategy = "auto"
@@ -85,6 +86,7 @@ def main():
 
     trainer = pl.Trainer(**trainer_kwargs)
     logger.info("Trainer initialized")
+    logger.info(f"DDP find_unused_parameters={find_unused if len(cfg.DEVICE) > 1 else 'auto'}")
 
     # Strict load pretrianed model
     # 只在非RESUME模式下加载，RESUME时由trainer.fit自动加载

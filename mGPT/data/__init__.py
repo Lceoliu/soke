@@ -1,5 +1,7 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
+from torch.utils.data import Subset
+import numpy as np
 
 
 class BASEDataModule(pl.LightningDataModule):
@@ -13,6 +15,32 @@ class BASEDataModule(pl.LightningDataModule):
         self._train_dataset = None
         self._val_dataset = None
         self._test_dataset = None
+
+    def _maybe_subset_eval_dataset(self, dataset, split="val"):
+        if split != "val":
+            return dataset
+        ratio = float(self.cfg.EVAL.get("VAL_SUBSET_RATIO", 1.0))
+        max_samples = int(self.cfg.EVAL.get("VAL_SUBSET_MAX_SAMPLES", 0) or 0)
+        if ratio >= 1.0 and max_samples <= 0:
+            return dataset
+
+        total = len(dataset)
+        if total <= 0:
+            return dataset
+
+        target = total
+        if ratio < 1.0:
+            target = max(1, int(total * max(ratio, 0.0)))
+        if max_samples > 0:
+            target = min(target, max_samples)
+        target = min(target, total)
+        if target >= total:
+            return dataset
+
+        # Deterministic evenly spaced subset to keep validation comparable
+        # across epochs while still covering the full dataset distribution.
+        indices = np.linspace(0, total - 1, num=target, dtype=int).tolist()
+        return Subset(dataset, indices)
 
     def get_sample_set(self, overrides={}):
         sample_params = self.hparams.copy()
@@ -87,7 +115,7 @@ class BASEDataModule(pl.LightningDataModule):
         dataloader_options["shuffle"] = False
         num_workers = int(dataloader_options["num_workers"])
         return DataLoader(
-            self.val_dataset,
+            self._maybe_subset_eval_dataset(self.val_dataset, split="val"),
             persistent_workers=(num_workers > 0),
             **dataloader_options,
         )

@@ -1,4 +1,5 @@
 import os
+import time
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoint
 
@@ -291,6 +292,9 @@ class progressLogger(Callback):
         self.metric_monitor = metric_monitor
         self.precision = precision
         self.log_every_n_steps = log_every_n_steps
+        self._last_val_epoch = None
+        self._train_epoch_start_time = None
+        self._val_epoch_start_time = None
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule,
                        **kwargs) -> None:
@@ -304,6 +308,49 @@ class progressLogger(Callback):
                                 pl_module: LightningModule, **kwargs) -> None:
         if trainer.sanity_checking:
             self.logger.info("Sanity checking ok.")
+            return
+        self._last_val_epoch = int(trainer.current_epoch)
+        metric_format = f"{{:.{self.precision}e}}"
+        val_duration = None
+        if self._val_epoch_start_time is not None:
+            val_duration = time.perf_counter() - self._val_epoch_start_time
+
+        metrics_str = []
+        losses_dict = trainer.callback_metrics
+        for metric_name, dico_name in self.metric_monitor.items():
+            if not self._is_validation_metric(dico_name):
+                continue
+            if dico_name not in losses_dict:
+                continue
+            metric = losses_dict[dico_name].item()
+            metric = metric_format.format(metric)
+            metrics_str.append(f"{metric_name} {metric}")
+
+        line = f"Val Epoch {trainer.current_epoch}"
+        if val_duration is not None:
+            line += f" [{val_duration / 60.0:.1f} min]"
+        if metrics_str:
+            line += ": " + "   ".join(metrics_str)
+        self.logger.info(line)
+        self._val_epoch_start_time = None
+
+    def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule, **kwargs) -> None:
+        self._train_epoch_start_time = time.perf_counter()
+
+    def on_validation_epoch_start(self, trainer: Trainer, pl_module: LightningModule, **kwargs) -> None:
+        if trainer.sanity_checking:
+            return
+        self._val_epoch_start_time = time.perf_counter()
+
+    @staticmethod
+    def _is_validation_metric(metric_key: str) -> bool:
+        metric_key = str(metric_key)
+        return (
+            metric_key.startswith("Metrics/")
+            or metric_key.startswith("val/")
+            or metric_key.endswith("/val")
+            or "/val/" in metric_key
+        )
 
     def on_train_epoch_end(self,
                            trainer: Trainer,
@@ -311,21 +358,30 @@ class progressLogger(Callback):
                            padding=False,
                            **kwargs) -> None:
         metric_format = f"{{:.{self.precision}e}}"
-        line = f"Epoch {trainer.current_epoch}"
+        train_duration = None
+        if self._train_epoch_start_time is not None:
+            train_duration = time.perf_counter() - self._train_epoch_start_time
+        line = f"Train Epoch {trainer.current_epoch}"
         if padding:
-            line = f"{line:>{len('Epoch xxxx')}}"  # Right padding
+            line = f"{line:>{len('Train Epoch xxxx')}}"  # Right padding
 
         if trainer.current_epoch % self.log_every_n_steps == 0:
             metrics_str = []
 
             losses_dict = trainer.callback_metrics
             for metric_name, dico_name in self.metric_monitor.items():
-                if dico_name in losses_dict:
-                    metric = losses_dict[dico_name].item()
-                    metric = metric_format.format(metric)
-                    metric = f"{metric_name} {metric}"
-                    metrics_str.append(metric)
+                if self._is_validation_metric(dico_name):
+                    continue
+                if dico_name not in losses_dict:
+                    continue
+                metric = losses_dict[dico_name].item()
+                metric = metric_format.format(metric)
+                metrics_str.append(f"{metric_name} {metric}")
 
-            line = line + ": " + "   ".join(metrics_str)
+            if train_duration is not None:
+                line += f" [{train_duration / 60.0:.1f} min]"
+            if metrics_str:
+                line += ": " + "   ".join(metrics_str)
 
         self.logger.info(line)
+        self._train_epoch_start_time = None

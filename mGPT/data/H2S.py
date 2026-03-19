@@ -248,7 +248,7 @@ class H2SDataModule(BASEDataModule):
             num_workers = int(dataloader_options["num_workers"])
             return [
                 DataLoader(
-                    dataset,
+                    self._maybe_subset_eval_dataset(dataset, split="val"),
                     persistent_workers=(num_workers > 0),
                     **dataloader_options,
                 )

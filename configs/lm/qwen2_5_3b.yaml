@@ -13,6 +13,6 @@ params:
   lora_rank: 64
   lora_alpha: 128
   lora_dropout: 0.05
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   mc_prefix_ratio: 0.5
   torch_dtype: bfloat16
