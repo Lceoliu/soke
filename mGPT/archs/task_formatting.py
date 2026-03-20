@@ -41,6 +41,14 @@ def serialize_sign_tokens(
     lhand_tokens: Optional[Sequence[int]] = None,
     rhand_tokens: Optional[Sequence[int]] = None,
 ) -> str:
+    return " ".join(serialize_sign_token_strings(body_tokens, lhand_tokens, rhand_tokens))
+
+
+def serialize_sign_token_strings(
+    body_tokens: Sequence[int],
+    lhand_tokens: Optional[Sequence[int]] = None,
+    rhand_tokens: Optional[Sequence[int]] = None,
+) -> List[str]:
     body = list(body_tokens)
     lhand = list(lhand_tokens) if lhand_tokens is not None else None
     rhand = list(rhand_tokens) if rhand_tokens is not None else None
@@ -57,7 +65,24 @@ def serialize_sign_tokens(
             pieces.append(f"<hand_id_{int(lhand[idx])}>")
         if rhand is not None:
             pieces.append(f"<rhand_id_{int(rhand[idx])}>")
-    return " ".join(pieces)
+    return pieces
+
+
+def sign_token_strings_to_ids(tokenizer, token_strings: Sequence[str]) -> List[int]:
+    token_ids = tokenizer.convert_tokens_to_ids(list(token_strings))
+    if isinstance(token_ids, int):
+        token_ids = [token_ids]
+    if len(token_ids) != len(token_strings):
+        raise ValueError("Tokenizer returned unexpected number of token ids for sign token sequence.")
+
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    missing = [
+        token for token, token_id in zip(token_strings, token_ids)
+        if token_id is None or (unk_id is not None and int(token_id) == int(unk_id))
+    ]
+    if missing:
+        raise ValueError(f"Tokenizer failed to resolve sign tokens: {missing[:8]}")
+    return [int(token_id) for token_id in token_ids]
 
 
 class SignLanguageTaskFormatter:

@@ -15,6 +15,8 @@ from mGPT.archs.task_formatting import (
     SignLanguageTaskFormatter,
     add_missing_special_tokens,
     serialize_sign_tokens,
+    serialize_sign_token_strings,
+    sign_token_strings_to_ids,
 )
 
 
@@ -28,7 +30,8 @@ class AllowedTokensLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids, scores):
         allowed = self.allowed_token_ids.to(device=scores.device)
         masked_scores = torch.full_like(scores, torch.finfo(scores.dtype).min)
-        masked_scores.index_fill_(1, allowed, 0.0)
+        allowed_scores = scores.index_select(1, allowed)
+        masked_scores.scatter_(1, allowed.unsqueeze(0).expand(scores.shape[0], -1), allowed_scores)
         return masked_scores
 
 
@@ -228,8 +231,8 @@ class QwenCausalLM(nn.Module):
         lhand_tokens: Optional[Sequence[int]] = None,
         rhand_tokens: Optional[Sequence[int]] = None,
     ) -> List[int]:
-        sign_str = serialize_sign_tokens(body_tokens, lhand_tokens, rhand_tokens)
-        return self.tokenizer(sign_str, add_special_tokens=False).input_ids
+        sign_tokens = serialize_sign_token_strings(body_tokens, lhand_tokens, rhand_tokens)
+        return sign_token_strings_to_ids(self.tokenizer, sign_tokens)
 
     def _motion_tensor_to_sign_token_ids(self, motion_tokens: Tensor) -> List[int]:
         if motion_tokens.dim() == 1:

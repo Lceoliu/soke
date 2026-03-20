@@ -31,7 +31,13 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from mGPT.archs.task_formatting import SignLanguageTaskFormatter, add_missing_special_tokens, serialize_sign_tokens
+from mGPT.archs.task_formatting import (
+    SignLanguageTaskFormatter,
+    add_missing_special_tokens,
+    serialize_sign_tokens,
+    serialize_sign_token_strings,
+    sign_token_strings_to_ids,
+)
 from mGPT.data.build_data import build_data
 from mGPT.data.humanml.load_data import load_csl_sample, load_h2s_sample, load_phoenix_sample
 from mGPT.config import get_module_config
@@ -290,7 +296,7 @@ def main():
         code = sample["code"]
         body, lhand, rhand = split_code_to_parts(code)
         sign_str = serialize_sign_tokens(body, lhand, rhand)
-        sign_ids = tokenizer(sign_str, add_special_tokens=False).input_ids
+        sign_ids = sign_token_strings_to_ids(tokenizer, serialize_sign_token_strings(body, lhand, rhand))
 
         for task in tasks:
             train_batch, prompt_ids = build_train_and_prompt(task, text, sign_ids, tokenizer, formatter)

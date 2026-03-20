@@ -50,12 +50,58 @@
   - 训练目标本身在优化
   - 但自由生成或后续解析没有和训练结果一致地工作
 
+#### `m2t-only overfit1`
+- 在修复 generation mask 之后，`overfit1` 已经可以正确生成目标文本。
+- 典型样例：
+
+```json
+{"name": "S000000_P0000_T00", "src": "csl", "gt": "你们好！", "pred": "你们好！", "length": 52}
+```
+
+- 这说明：
+  - 当前 `m2t` 训练目标并非完全失效；
+  - 单样本条件下，Qwen + unified vocab + current formatter 是可以工作的；
+  - 之后的问题不再是“1 条样本都学不会”，而是“从 1 条扩到 4 条时发生模式坍缩”。
+
+#### `m2t-only overfit4`
+- 在修复 generation mask 之后，`overfit4` 的自由生成结果如下：
+
+```json
+{"name": "S000000_P0000_T00", "src": "csl", "gt": "你们好！", "pred": "你们好！", "length": 52}
+{"name": "S000001_P0000_T00", "src": "csl", "gt": "对不起！", "pred": "你们好！", "length": 40}
+{"name": "S000002_P0000_T00", "src": "csl", "gt": "没关系！", "pred": "你们好！", "length": 40}
+{"name": "S000003_P0000_T00", "src": "csl", "gt": "谢谢！", "pred": "你们好！", "length": 40}
+```
+
+- 这说明：
+  - `overfit4` 不是随机失败，而是明显塌缩到单一高频句子 `你们好！`；
+  - 失败模式是“首 token 判别即塌缩”，不是长序列后半段才漂移。
+
+#### `t2m-only overfit1/4`
+- `t2m` 当前最关键的问题已经定位为 **训练 prompt 与推理 prompt 不一致**。
+- 训练时 `t2m` 的 formatter 直接按 token id 手工拼接：
+  - `<t2m> <text> TEXT </text> <sign>`
+- 推理时 `_make_t2m_prompt()` 之前却走了字符串再 tokenizer 的路径：
+  - `"<t2m> <text> {text} </text> <sign>"`
+- 这会引入额外空格 token。
+- `prompt parity` 已抓到这个问题：
+  - `t2m prefix_match = 0`
+  - `m2t prefix_match = 1`
+- 典型 mismatch：
+  - train ids 开头：`[151665, 151670, ...]`
+  - infer ids 开头：`[151665, 220, 151670, 220, ...]`
+- 直接后果：
+  - `t2m` 生成 token 长度会异常短；
+  - 后续 `_decode_generated_motion_parts()` 把 `len(body_tokens) <= 1` 的结果回填成全零动作；
+  - 自动可视化中的 `*_pred.npy` 出现 `(1,133)` 全零张量。
+
 ### 1.4 当前最重要的判断
 仅根据 loss 和生成结果，最合理的判断不是“模型完全没学会”，而是：
 
-1. teacher forcing 下的训练目标大概率已经学会；
-2. 自由生成阶段存在明显偏差；
-3. 问题更像是“训练-推理不一致 / 生成约束不足 / 解析规则有误”，而不是简单的“轮数不够”。
+1. `m2t overfit1` 已经证明 teacher forcing 与自由生成在单样本上可以对齐；
+2. `m2t overfit4` 表明从 1 条扩到 4 条后，模型在首 token 上即发生模式坍缩；
+3. `t2m` 当前存在明确实现 bug，即训练-推理 prompt mismatch；
+4. 问题更像是“训练-推理不一致 / 生成约束实现错误 / 少样本下输入可分性不足”，而不是简单的“轮数不够”。
 
 ## 2. 诊断原则
 
@@ -74,10 +120,42 @@
 
 按优先级排序如下：
 
-1. 训练 prompt 与推理 prompt 并不完全一致。
-2. unified vocab 下，`t2m / m2t / mc` 的生成阶段缺少 task-specific output constraint。
-3. `</sign>` / `</text>` 的停止规则、`max_new_tokens`、decode/parse 逻辑存在不一致。
-4. sign token 对短句语义的可分性不足，但这属于第二层问题，不应先于训练-推理一致性排查。
+1. `t2m` 的训练 prompt 与推理 prompt 并不一致。
+2. `m2t` 曾存在 generation mask 实现错误，已修复，但仍需继续验证修复后的自由生成行为。
+3. `m2t` 在 `overfit4` 上的 teacher-forced token accuracy 本身也未满分，说明不是纯推理 bug。
+4. `</sign>` / `</text>` 的停止规则、`max_new_tokens`、decode/parse 逻辑仍需继续做系统性检查。
+5. sign token 对短句语义的可分性不足，但这属于第二层问题，不应先于训练-推理一致性排查。
+
+## 3.1 已定位并修复的实现问题
+
+### A. `m2t` generation mask bug
+- 之前的 `AllowedTokensLogitsProcessor` 逻辑错误地把“允许 token 的 logits 全部重置为 0”，而不是保留它们的原始 logits。
+- 旧逻辑等价于：
+
+```python
+masked_scores = full(-inf)
+masked_scores[allowed] = 0
+```
+
+- 这会导致：
+  - 所有允许 token 变成完全等价；
+  - greedy decode 容易反复选择某个固定 token；
+  - 在中文 `m2t` 中，实际观察到输出塌成 `！！！！！！！！...`。
+- 修复后：
+  - 只把不允许 token 设为 `-inf`
+  - 对允许 token 保留原始 logits
+- 修复后的直接结果：
+  - `overfit1 m2t` 可以正常生成 `你们好！`
+  - `overfit4 m2t` 不再输出纯标点，而是塌缩到真实中文句子 `你们好！`
+
+### B. `t2m` prompt parity bug
+- 该问题尚未修复完成，但已经有充分证据证明是当前 `t2m` 失败的主要来源。
+- 证据：
+  - `prompt_parity` 中 `t2m prefix_match = 0`
+  - `m2t prefix_match = 1`
+- 说明：
+  - `m2t` 不能直接拿 `t2m` 的问题来解释；
+  - `t2m` 当前需要优先修 prompt builder，而不是继续盲目调参。
 
 ## 4. 参考的官方经验
 
@@ -190,6 +268,20 @@ cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke
   - 每个样本的 token accuracy
   - 按任务汇总的平均 accuracy
 
+当前已经完成的 `overfit4 m2t` 结果：
+
+```json
+{"name": "S000000_P0000_T00", "gt": "你们好！", "pred": "你们好！", "teacher_forced_token_acc": 1.0, "teacher_forced_valid_tokens": 4, "first_divergence_index": -1, "free_run_exact_match": true}
+{"name": "S000001_P0000_T00", "gt": "对不起！", "pred": "你们好！", "teacher_forced_token_acc": 0.6667, "teacher_forced_valid_tokens": 3, "first_divergence_index": 0, "free_run_exact_match": false}
+{"name": "S000002_P0000_T00", "gt": "没关系！", "pred": "你们好！", "teacher_forced_token_acc": 0.6667, "teacher_forced_valid_tokens": 3, "first_divergence_index": 0, "free_run_exact_match": false}
+{"name": "S000003_P0000_T00", "gt": "谢谢！", "pred": "你们好！", "teacher_forced_token_acc": 0.6667, "teacher_forced_valid_tokens": 3, "first_divergence_index": 0, "free_run_exact_match": false}
+```
+
+这组结果的意义：
+- `teacher_forced_token_acc` 平均只有 `0.75`；
+- 说明 `overfit4 m2t` 当前并非“训练目标完全学会，只是推理有 bug”；
+- 至少后三条样本在 teacher forcing 条件下，也已经在首 token 上发生混淆。
+
 推荐命令：
 
 `t2m teacher-forced / free-run 诊断`
@@ -221,6 +313,14 @@ cd /home/SOKE && source /opt/conda/etc/profile.d/conda.sh && conda activate soke
   - 前缀正确后漂移：优先怀疑 stop rule / output space / exposure bias
 - 输出：
   - 每个样本的 divergence report
+
+当前已经完成的 `overfit4 m2t` divergence 结果：
+- `divergences = [-1, 0, 0, 0]`
+
+解释：
+- 第一条样本完全对齐；
+- 后三条样本都在 **第 0 个 token** 就偏离；
+- 因而当前失败不是“后面滚歪了”，而是 **首 token 级别的模式坍缩**。
 
 说明：
 - 当前由 `scripts/analysis/diagnose_qwen_overfit.py` 一并导出：
