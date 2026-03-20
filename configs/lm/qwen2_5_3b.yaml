@@ -16,3 +16,4 @@ params:
   gradient_checkpointing: false
   mc_prefix_ratio: 0.5
   torch_dtype: bfloat16
+  sign_streams: [body, lhand, rhand]

@@ -18,6 +18,8 @@ SPECIAL_TASK_TOKENS = [
     "</cont>",
 ]
 
+VALID_SIGN_STREAMS = ("body", "lhand", "rhand")
+
 
 @dataclass
 class CausalTaskBatch:
@@ -36,35 +38,68 @@ def add_missing_special_tokens(tokenizer) -> List[str]:
     return missing
 
 
+def normalize_sign_streams(streams: Optional[Sequence[str]] = None) -> List[str]:
+    if streams is None:
+        return list(VALID_SIGN_STREAMS)
+    normalized: List[str] = []
+    for stream in streams:
+        key = str(stream).strip().lower()
+        if key not in VALID_SIGN_STREAMS:
+            raise ValueError(f"Unsupported sign stream: {stream}. Expected one of {VALID_SIGN_STREAMS}.")
+        if key not in normalized:
+            normalized.append(key)
+    if not normalized:
+        raise ValueError("sign_streams must contain at least one active stream.")
+    return normalized
+
+
 def serialize_sign_tokens(
-    body_tokens: Sequence[int],
+    body_tokens: Optional[Sequence[int]] = None,
     lhand_tokens: Optional[Sequence[int]] = None,
     rhand_tokens: Optional[Sequence[int]] = None,
+    sign_streams: Optional[Sequence[str]] = None,
 ) -> str:
-    return " ".join(serialize_sign_token_strings(body_tokens, lhand_tokens, rhand_tokens))
+    return " ".join(
+        serialize_sign_token_strings(
+            body_tokens=body_tokens,
+            lhand_tokens=lhand_tokens,
+            rhand_tokens=rhand_tokens,
+            sign_streams=sign_streams,
+        )
+    )
 
 
 def serialize_sign_token_strings(
-    body_tokens: Sequence[int],
+    body_tokens: Optional[Sequence[int]] = None,
     lhand_tokens: Optional[Sequence[int]] = None,
     rhand_tokens: Optional[Sequence[int]] = None,
+    sign_streams: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    body = list(body_tokens)
-    lhand = list(lhand_tokens) if lhand_tokens is not None else None
-    rhand = list(rhand_tokens) if rhand_tokens is not None else None
+    active_streams = normalize_sign_streams(sign_streams)
+    token_map = {
+        "body": list(body_tokens) if body_tokens is not None else None,
+        "lhand": list(lhand_tokens) if lhand_tokens is not None else None,
+        "rhand": list(rhand_tokens) if rhand_tokens is not None else None,
+    }
+    missing = [stream for stream in active_streams if token_map[stream] is None]
+    if missing:
+        raise ValueError(f"Missing token sequences for active sign streams: {missing}")
 
-    if lhand is not None and len(lhand) != len(body):
-        raise ValueError(f"Left-hand token length {len(lhand)} != body token length {len(body)}")
-    if rhand is not None and len(rhand) != len(body):
-        raise ValueError(f"Right-hand token length {len(rhand)} != body token length {len(body)}")
+    active_lengths = [len(token_map[stream]) for stream in active_streams]
+    if len(set(active_lengths)) != 1:
+        raise ValueError(f"Active sign stream lengths do not match: {dict((s, len(token_map[s])) for s in active_streams)}")
+    seq_len = active_lengths[0]
 
     pieces: List[str] = []
-    for idx, b in enumerate(body):
-        pieces.append(f"<motion_id_{int(b)}>")
-        if lhand is not None:
-            pieces.append(f"<hand_id_{int(lhand[idx])}>")
-        if rhand is not None:
-            pieces.append(f"<rhand_id_{int(rhand[idx])}>")
+    for idx in range(seq_len):
+        for stream in active_streams:
+            tok = int(token_map[stream][idx])
+            if stream == "body":
+                pieces.append(f"<motion_id_{tok}>")
+            elif stream == "lhand":
+                pieces.append(f"<hand_id_{tok}>")
+            elif stream == "rhand":
+                pieces.append(f"<rhand_id_{tok}>")
     return pieces
 
 

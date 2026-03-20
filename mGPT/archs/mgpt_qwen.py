@@ -14,6 +14,7 @@ from peft import LoraConfig, get_peft_model
 from mGPT.archs.task_formatting import (
     SignLanguageTaskFormatter,
     add_missing_special_tokens,
+    normalize_sign_streams,
     serialize_sign_tokens,
     serialize_sign_token_strings,
     sign_token_strings_to_ids,
@@ -54,6 +55,7 @@ class QwenCausalLM(nn.Module):
         gradient_checkpointing: bool = True,
         mc_prefix_ratio: float = 0.5,
         torch_dtype: str = "bfloat16",
+        sign_streams: Optional[Sequence[str]] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -69,7 +71,8 @@ class QwenCausalLM(nn.Module):
         self.hand_codebook_size = int(hand_codebook_size)
         self.rhand_codebook_size = int(rhand_codebook_size)
         self.mc_prefix_ratio = float(mc_prefix_ratio)
-        self.num_token_parts = 1 + int(self.hand_codebook_size > 0) + int(self.rhand_codebook_size > 0)
+        self.sign_streams = normalize_sign_streams(sign_streams)
+        self.num_token_parts = int(len(self.sign_streams))
         self.model_dtype = self._resolve_torch_dtype(torch_dtype)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -227,22 +230,31 @@ class QwenCausalLM(nn.Module):
 
     def _build_sign_token_ids(
         self,
-        body_tokens: Sequence[int],
+        body_tokens: Optional[Sequence[int]] = None,
         lhand_tokens: Optional[Sequence[int]] = None,
         rhand_tokens: Optional[Sequence[int]] = None,
     ) -> List[int]:
-        sign_tokens = serialize_sign_token_strings(body_tokens, lhand_tokens, rhand_tokens)
+        sign_tokens = serialize_sign_token_strings(
+            body_tokens=body_tokens,
+            lhand_tokens=lhand_tokens,
+            rhand_tokens=rhand_tokens,
+            sign_streams=self.sign_streams,
+        )
         return sign_token_strings_to_ids(self.tokenizer, sign_tokens)
 
     def _motion_tensor_to_sign_token_ids(self, motion_tokens: Tensor) -> List[int]:
         if motion_tokens.dim() == 1:
-            return self._build_sign_token_ids(motion_tokens.long().tolist())
+            if self.sign_streams != ["body"]:
+                raise ValueError(
+                    f"1D motion tensor can only be serialized with sign_streams=['body'], got {self.sign_streams}"
+                )
+            return self._build_sign_token_ids(body_tokens=motion_tokens.long().tolist())
         if motion_tokens.dim() != 2:
             raise ValueError(f"Unsupported motion tensor shape for sign serialization: {tuple(motion_tokens.shape)}")
-        body = motion_tokens[:, 0].long().tolist()
+        body = motion_tokens[:, 0].long().tolist() if motion_tokens.shape[1] > 0 else None
         lhand = motion_tokens[:, 1].long().tolist() if motion_tokens.shape[1] > 1 else None
         rhand = motion_tokens[:, 2].long().tolist() if motion_tokens.shape[1] > 2 else None
-        return self._build_sign_token_ids(body, lhand, rhand)
+        return self._build_sign_token_ids(body_tokens=body, lhand_tokens=lhand, rhand_tokens=rhand)
 
     def _build_allowed_token_ids(self, task: str, stop_token_id: int) -> List[int]:
         task = str(task).lower()
@@ -255,10 +267,18 @@ class QwenCausalLM(nn.Module):
         sign_prefixes = ("<motion_id_", "<hand_id_", "<rhand_id_")
 
         if task in ["t2m", "mc", "pred", "continuation"]:
+            allowed_prefixes = []
+            if "body" in self.sign_streams:
+                allowed_prefixes.append("<motion_id_")
+            if "lhand" in self.sign_streams:
+                allowed_prefixes.append("<hand_id_")
+            if "rhand" in self.sign_streams:
+                allowed_prefixes.append("<rhand_id_")
+            allowed_prefixes = tuple(allowed_prefixes)
             allowed = [
                 tok_id
                 for tok, tok_id in vocab.items()
-                if tok.startswith(sign_prefixes) or int(tok_id) == int(stop_token_id)
+                if tok.startswith(allowed_prefixes) or int(tok_id) == int(stop_token_id)
             ]
             # Keep only the stop token among special tokens.
             allowed = [tok_id for tok_id in allowed if self.tokenizer.convert_ids_to_tokens(int(tok_id)) not in all_special or int(tok_id) == int(stop_token_id)]
@@ -326,11 +346,14 @@ class QwenCausalLM(nn.Module):
         )
 
     def _make_t2m_prompt(self, text: str) -> torch.Tensor:
-        seq = (
-            f"<t2m> <text> {text} </text> <sign>"
-        )
-        ids = self.tokenizer(seq, add_special_tokens=False, return_tensors="pt").input_ids
-        return ids
+        seq = [
+            self.special_token_ids["<t2m>"],
+            self.special_token_ids["<text>"],
+            *self.task_formatter._tokenize_text(text),
+            self.special_token_ids["</text>"],
+            self.special_token_ids["<sign>"],
+        ]
+        return torch.tensor(seq, dtype=torch.long).unsqueeze(0)
 
     def _make_m2t_prompt(self, sign_token_ids: Sequence[int]) -> torch.Tensor:
         seq = [
@@ -419,16 +442,26 @@ class QwenCausalLM(nn.Module):
             elif token.startswith("<rhand_id_"):
                 rhand.append(int(token[len("<rhand_id_"):-1]))
 
-        min_len = len(body)
-        if lhand:
-            min_len = min(min_len, len(lhand))
-        if rhand:
-            min_len = min(min_len, len(rhand))
-        body = body[:min_len]
-        if lhand:
+        active_lengths = []
+        if "body" in self.sign_streams:
+            active_lengths.append(len(body))
+        if "lhand" in self.sign_streams:
+            active_lengths.append(len(lhand))
+        if "rhand" in self.sign_streams:
+            active_lengths.append(len(rhand))
+        min_len = min(active_lengths) if active_lengths else 0
+        if "body" in self.sign_streams:
+            body = body[:min_len]
+        else:
+            body = []
+        if "lhand" in self.sign_streams:
             lhand = lhand[:min_len]
-        if rhand:
+        else:
+            lhand = []
+        if "rhand" in self.sign_streams:
             rhand = rhand[:min_len]
+        else:
+            rhand = []
 
         body_tensor = torch.tensor(body, dtype=torch.long, device=self.device)
         lhand_tensor = (
@@ -665,5 +698,13 @@ class QwenCausalLM(nn.Module):
                 lhand = outputs_tokens_hand[idx].tolist()
             if outputs_tokens_rhand is not None:
                 rhand = outputs_tokens_rhand[idx].tolist()
-            output_texts.append(serialize_sign_tokens(body.tolist(), lhand, rhand))
+            body_list = body.tolist() if body.numel() > 0 else None
+            output_texts.append(
+                serialize_sign_tokens(
+                    body_tokens=body_list,
+                    lhand_tokens=lhand,
+                    rhand_tokens=rhand,
+                    sign_streams=self.sign_streams,
+                )
+            )
         return outputs_tokens, output_texts

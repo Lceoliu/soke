@@ -31,6 +31,7 @@ GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-""}
 GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-""}
 MAX_LENGTH=${MAX_LENGTH:-""}
 TORCH_DTYPE=${TORCH_DTYPE:-""}
+SIGN_STREAMS=${SIGN_STREAMS:-""}
 
 # Dataset overrides
 DATASET_NAME=${DATASET_NAME:-""}
@@ -97,7 +98,7 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
 RUN_CFG="$CFG"
-if [[ -n "$BATCH_SIZE" || -n "$END_EPOCH" || -n "$EXP_NAME" || -n "$PRETRAINED_VAE" || -n "$RESUME_CKPT" || -n "$NUM_WORKERS" || -n "$ACCUMULATE_GRAD_BATCHES" || -n "$PRECISION" || -n "$QWEN_MODEL_PATH" || -n "$USE_LORA" || -n "$LORA_RANK" || -n "$LORA_ALPHA" || -n "$LORA_DROPOUT" || -n "$GRADIENT_CHECKPOINTING" || -n "$GEN_MAX_NEW_TOKENS" || -n "$MAX_LENGTH" || -n "$TORCH_DTYPE" || -n "$DATASET_NAME" || -n "$H2S_ROOT" || -n "$CSL_ROOT" || -n "$PHOENIX_ROOT" || -n "$MEAN_PATH" || -n "$STD_PATH" || -n "$CODE_PATH" ]]; then
+if [[ -n "$BATCH_SIZE" || -n "$END_EPOCH" || -n "$EXP_NAME" || -n "$PRETRAINED_VAE" || -n "$RESUME_CKPT" || -n "$NUM_WORKERS" || -n "$ACCUMULATE_GRAD_BATCHES" || -n "$PRECISION" || -n "$QWEN_MODEL_PATH" || -n "$USE_LORA" || -n "$LORA_RANK" || -n "$LORA_ALPHA" || -n "$LORA_DROPOUT" || -n "$GRADIENT_CHECKPOINTING" || -n "$GEN_MAX_NEW_TOKENS" || -n "$MAX_LENGTH" || -n "$TORCH_DTYPE" || -n "$SIGN_STREAMS" || -n "$DATASET_NAME" || -n "$H2S_ROOT" || -n "$CSL_ROOT" || -n "$PHOENIX_ROOT" || -n "$MEAN_PATH" || -n "$STD_PATH" || -n "$CODE_PATH" ]]; then
   TMP_CFG="/tmp/soke_qwen_train_${TS}.yaml"
   "$PYTHON_BIN" - <<PY
 from omegaconf import OmegaConf
@@ -148,6 +149,8 @@ if "$MAX_LENGTH":
     cfg.model.params.lm.params.max_length = int("$MAX_LENGTH")
 if "$TORCH_DTYPE":
     cfg.model.params.lm.params.torch_dtype = "$TORCH_DTYPE"
+if "$SIGN_STREAMS":
+    cfg.model.params.lm.params.sign_streams = [x.strip().lower() for x in "$SIGN_STREAMS".split(",") if x.strip()]
 if "$DATASET_NAME":
     cfg.DATASET.H2S.DATASET_NAME = "$DATASET_NAME"
 if "$H2S_ROOT":

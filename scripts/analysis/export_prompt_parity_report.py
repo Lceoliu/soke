@@ -34,6 +34,7 @@ if ROOT_DIR not in sys.path:
 from mGPT.archs.task_formatting import (
     SignLanguageTaskFormatter,
     add_missing_special_tokens,
+    normalize_sign_streams,
     serialize_sign_tokens,
     serialize_sign_token_strings,
     sign_token_strings_to_ids,
@@ -198,10 +199,13 @@ def build_train_and_prompt(task: str, text: str, sign_ids: Sequence[int], tokeni
     task = str(task).lower()
     if task == "t2m":
         train = formatter.build_batch([task], [text], [list(sign_ids)])
-        prompt = tokenizer(
-            f"<t2m> <text> {text} </text> <sign>",
-            add_special_tokens=False,
-        ).input_ids
+        prompt = [
+            tokenizer.convert_tokens_to_ids("<t2m>"),
+            tokenizer.convert_tokens_to_ids("<text>"),
+            *formatter._tokenize_text(text),
+            tokenizer.convert_tokens_to_ids("</text>"),
+            tokenizer.convert_tokens_to_ids("<sign>"),
+        ]
         return train, prompt
 
     if task == "m2t":
@@ -216,6 +220,11 @@ def build_train_and_prompt(task: str, text: str, sign_ids: Sequence[int], tokeni
         return train, prompt
 
     raise NotImplementedError(f"Unsupported task for parity export: {task}")
+
+
+def get_sign_streams(cfg) -> List[str]:
+    streams = cfg.model.params.lm.params.get("sign_streams", None)
+    return normalize_sign_streams(streams)
 
 
 def get_expected_tokens(task: str):
@@ -270,6 +279,7 @@ def main():
     datamodule = build_data(cfg)
     tokenizer = build_tokenizer(cfg)
     formatter = SignLanguageTaskFormatter(tokenizer)
+    sign_streams = get_sign_streams(cfg)
 
     samples = load_training_samples(datamodule, args.num_examples)
     if len(samples) == 0:
@@ -295,8 +305,21 @@ def main():
         text = sample["text"]
         code = sample["code"]
         body, lhand, rhand = split_code_to_parts(code)
-        sign_str = serialize_sign_tokens(body, lhand, rhand)
-        sign_ids = sign_token_strings_to_ids(tokenizer, serialize_sign_token_strings(body, lhand, rhand))
+        sign_str = serialize_sign_tokens(
+            body_tokens=body,
+            lhand_tokens=lhand,
+            rhand_tokens=rhand,
+            sign_streams=sign_streams,
+        )
+        sign_ids = sign_token_strings_to_ids(
+            tokenizer,
+            serialize_sign_token_strings(
+                body_tokens=body,
+                lhand_tokens=lhand,
+                rhand_tokens=rhand,
+                sign_streams=sign_streams,
+            ),
+        )
 
         for task in tasks:
             train_batch, prompt_ids = build_train_and_prompt(task, text, sign_ids, tokenizer, formatter)
@@ -337,6 +360,7 @@ def main():
                     "name": sample["name"],
                     "src": sample["src"],
                     "text": text,
+                    "sign_streams": sign_streams,
                     "sign_token_count": len(sign_ids),
                     "train_input_ids": train_input_ids,
                     "train_tokens": train_tokens,
