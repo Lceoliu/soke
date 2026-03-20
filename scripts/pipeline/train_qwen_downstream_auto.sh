@@ -165,6 +165,7 @@ if "$STD_PATH":
     cfg.DATASET.H2S.STD_PATH = "$STD_PATH"
 if "$CODE_PATH":
     cfg.DATASET.CODE_PATH = "$CODE_PATH"
+cfg.FULL_CONFIG = True
 OmegaConf.save(cfg, "$TMP_CFG")
 print("saved", "$TMP_CFG")
 PY
