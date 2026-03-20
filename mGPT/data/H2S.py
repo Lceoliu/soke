@@ -51,6 +51,7 @@ class H2SDataModule(BASEDataModule):
             'TASK_SAMPLING',
             {'t2m': 0.5, 'm2t': 0.2, 'mc': 0.3},
         ))
+        self.hparams.enable_token_drop_aug = bool(cfg.DATASET.H2S.get('ENABLE_TOKEN_DROP_AUG', True))
         self.hparams.lm_val_tasks = list(cfg.EVAL.get('LM_VAL_TASKS', ['t2m', 'm2t', 'mc']))
         
         # Path to the dataset

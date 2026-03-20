@@ -1,14 +1,51 @@
-from omegaconf import OmegaConf
+lst = [
+    151666,
+    151668,
+    152087,
+    152235,
+    152249,
+    152148,
+    152223,
+    152296,
+    152299,
+    152253,
+    152255,
+    152257,
+    152282,
+    152316,
+    152215,
+    152202,
+    152207,
+    152312,
+    152213,
+    152234,
+    152159,
+    152251,
+    152087,
+    152106,
+    152139,
+    152315,
+    152215,
+    152202,
+    152091,
+    152314,
+    152087,
+    152102,
+    152095,
+    152251,
+    152223,
+    152225,
+    152071,
+    152313,
+    152095,
+    152064,
+    152223,
+    152164,
+    151669,
+    151670,
+]
+output_lst = []
+for s in lst:
+    output_lst.append("<debug_sign_" + str(s) + ">")
 
-cfg = OmegaConf.load(
-    '/home/SOKE/experiments/overfit_RE/SOKE_QWEN_CSL_OVERFIT4_M2T_RE/config_2026-03-20-15-31-56_train.yaml'
-)
-cfg.TRAIN.NUM_WORKERS = 0
-cfg.TEST.BATCH_SIZE = 1
-cfg.EVAL.BATCH_SIZE = 1
-cfg.TEST.CHECKPOINTS = '/home/SOKE/experiments/overfit_RE/SOKE_QWEN_CSL_OVERFIT4_M2T_RE/checkpoints/last.ckpt'
-cfg.TEST.SPLIT = 'train'
-cfg.model.params.task = 'm2t'
-cfg.METRIC.TYPE = []
-OmegaConf.save(cfg, '/tmp/overfit_re_m2t_eval.yaml')
-print('saved /tmp/overfit_re_m2t_eval.yaml')
+print(output_lst)

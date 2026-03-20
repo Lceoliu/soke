@@ -80,8 +80,10 @@ def _token_acc_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> Tuple[
 
 
 def _format_sample_tokens(model, motion_sample: torch.Tensor, length: int) -> List[int]:
-    body, lhand, rhand = model._split_motion_sample(motion_sample, int(length))
-    return model._build_sign_token_ids(body, lhand, rhand)
+    if not hasattr(model, "lm"):
+        raise AttributeError("Expected model.lm to exist for Qwen diagnostics.")
+    body, lhand, rhand = model.lm._split_motion_sample(motion_sample, int(length))
+    return model.lm._build_sign_token_ids(body, lhand, rhand)
 
 
 def _build_task_batch(model, task: str, texts: List[str], motion_batch: torch.Tensor, lengths: Sequence[int]):
@@ -89,12 +91,12 @@ def _build_task_batch(model, task: str, texts: List[str], motion_batch: torch.Te
     sign_token_ids = []
     for i in range(len(texts)):
         sign_token_ids.append(_format_sample_tokens(model, motion_batch[i], lengths[i]))
-    batch = model.task_formatter.build_batch(
+    batch = model.lm.task_formatter.build_batch(
         task_names=task_names,
         texts=texts,
         sign_token_ids=sign_token_ids,
         mc_prefix_ratio=getattr(model, "mc_prefix_ratio", 0.5),
-        mc_group_size=getattr(model, "num_token_parts", 1),
+        mc_group_size=getattr(model.lm, "num_token_parts", 1),
     )
     return batch, sign_token_ids
 
@@ -104,12 +106,20 @@ def _teacher_forced_metrics(model, task: str, texts: List[str], motion_batch: to
     input_ids = batch.input_ids.to(model.device)
     attention_mask = batch.attention_mask.to(model.device)
     labels = batch.labels.to(model.device)
-    outputs = model.language_model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        labels=labels,
-        return_dict=True,
-    )
+    if hasattr(model, "language_model"):
+        outputs = model.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True,
+        )
+    else:
+        outputs = model.lm.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True,
+        )
     logits = outputs.logits.detach().float().cpu()
     labels_cpu = labels.detach().cpu()
     acc, valid_tokens = _token_acc_from_logits(logits, labels_cpu)
@@ -146,22 +156,22 @@ def _teacher_forced_metrics(model, task: str, texts: List[str], motion_batch: to
 
 def _free_run_metrics(model, task: str, texts: List[str], motion_batch: torch.Tensor, lengths: Sequence[int]):
     if task == "t2m":
-        gen_outputs = model.generate_direct(texts=texts, do_sample=False)
+        gen_outputs = model.lm.generate_direct(texts=texts, do_sample=False)
         _, pred_texts = gen_outputs
         pred_texts = list(pred_texts)
         pred_ids_list = [
-            model.tokenizer(t, add_special_tokens=False).input_ids for t in pred_texts
+            model.lm.tokenizer(t, add_special_tokens=False).input_ids for t in pred_texts
         ]
     elif task == "m2t":
         motion_tokens = [motion_batch[i] for i in range(len(texts))]
-        pred_texts = model.generate_conditional(
+        pred_texts = model.lm.generate_conditional(
             motion_tokens=motion_tokens,
             task="m2t",
             stage="test",
             do_sample=False,
         )
         pred_ids_list = [
-            model.tokenizer(t, add_special_tokens=False).input_ids for t in pred_texts
+            model.lm.tokenizer(t, add_special_tokens=False).input_ids for t in pred_texts
         ]
     else:
         raise NotImplementedError(f"Unsupported task for free-run diagnostics: {task}")
@@ -281,8 +291,8 @@ def main():
                     "target_ids_with_eos": per["target_ids_with_eos"],
                     "target_ids_no_eos": target_no_eos,
                     "pred_ids": pred_ids,
-                    "target_tokens_no_eos": model.tokenizer.convert_ids_to_tokens(target_no_eos),
-                    "pred_tokens": model.tokenizer.convert_ids_to_tokens(pred_ids),
+                    "target_tokens_no_eos": model.lm.tokenizer.convert_ids_to_tokens(target_no_eos),
+                    "pred_tokens": model.lm.tokenizer.convert_ids_to_tokens(pred_ids),
                     "pred_text": pred_texts[i],
                     "target_text": texts[i],
                     "target_len_no_eos": len(target_no_eos),

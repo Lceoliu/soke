@@ -64,6 +64,7 @@ class Text2MotionDatasetCB(data.Dataset):
         self.fixed_task = kwargs.get("fixed_task", None)
         self.train_task_classes = list(kwargs.get("train_task_classes", []))
         self.task_sampling = kwargs.get("task_sampling", {}) or {}
+        self.enable_token_drop_aug = bool(kwargs.get("enable_token_drop_aug", True))
         
         if task_path:
             instructions = task_path
@@ -234,7 +235,7 @@ class Text2MotionDatasetCB(data.Dataset):
             idx = (m_tokens.shape[0] - m_length) // 2
             m_tokens = m_tokens[idx:idx + m_length]
 
-        coin = np.random.choice([False, False, True])
+        coin = self.enable_token_drop_aug and np.random.choice([False, False, True])
         if coin:
             # Drop one frame-worth token group at head/tail to keep level alignment.
             drop_count = int(max(q_factor, 1))

@@ -67,6 +67,7 @@ DATASET:
     UNIT_LEN: 4
     STD_TEXT: false
     DYNAMIC_TASK_SAMPLING: true
+    ENABLE_TOKEN_DROP_AUG: false
     TRAIN_TASKS: ['m2t']
     TASK_SAMPLING:
       m2t: 1.0
