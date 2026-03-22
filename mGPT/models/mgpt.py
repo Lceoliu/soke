@@ -392,10 +392,17 @@ class MotionGPT(BaseModel):
 
     def _build_eval_motion_tokens(self, motion_batch: torch.Tensor, lengths) -> List[torch.Tensor]:
         motion_tokens = []
+        expected_nfeats = int(
+            getattr(
+                self.datamodule,
+                "nfeats",
+                getattr(self.hparams.cfg.DATASET, "NFEATS", 133),
+            )
+        )
         is_raw_feature_batch = (
             torch.is_tensor(motion_batch)
             and motion_batch.dim() == 3
-            and int(motion_batch.shape[-1]) == int(self.nfeats)
+            and int(motion_batch.shape[-1]) == expected_nfeats
         )
         for i in range(len(motion_batch)):
             cur_len = int(lengths[i])
