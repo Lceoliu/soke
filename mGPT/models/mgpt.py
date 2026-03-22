@@ -12,7 +12,7 @@ from .base import BaseModel
 import json
 import mGPT.render.matplot.plot_3d_global as plot_3d
 from mGPT.utils.human_models import get_coord, smpl_x
-
+from typing import List, Optional, Dict, Any
 
 class MotionGPT(BaseModel):
     """
@@ -42,18 +42,18 @@ class MotionGPT(BaseModel):
         if motion_vae != None:
             self.vae = instantiate_from_config(motion_vae)
             lm['params']['motion_codebook_size'] = self.vae.code_num
-        
+
         # additional hand vae
         self.hand_vae_cfg = kwargs.get('hand_vae_cfg', None)
         if self.hand_vae_cfg is not None:
             self.hand_vae = instantiate_from_config(self.hand_vae_cfg)
             lm['params']['hand_codebook_size'] = self.hand_vae.code_num
-        
+
         self.rhand_vae_cfg = kwargs.get('rhand_vae_cfg', None)
         if self.rhand_vae_cfg is not None:
             self.rhand_vae = instantiate_from_config(self.rhand_vae_cfg)
             lm['params']['rhand_codebook_size'] = self.rhand_vae.code_num
-        
+
         self.face_vae_cfg = kwargs.get('face_vae_cfg', None)
         if self.face_vae_cfg is not None:
             self.face_vae = instantiate_from_config(self.face_vae_cfg)
@@ -392,16 +392,21 @@ class MotionGPT(BaseModel):
 
     def _build_eval_motion_tokens(self, motion_batch: torch.Tensor, lengths) -> List[torch.Tensor]:
         motion_tokens = []
+        is_raw_feature_batch = (
+            torch.is_tensor(motion_batch)
+            and motion_batch.dim() == 3
+            and int(motion_batch.shape[-1]) == int(self.nfeats)
+        )
         for i in range(len(motion_batch)):
             cur_len = int(lengths[i])
-            cur_motion = motion_batch[i:i + 1, :cur_len]
-            if torch.is_floating_point(cur_motion):
+            if is_raw_feature_batch:
+                cur_motion = motion_batch[i : i + 1, :cur_len]
                 motion_tokens.append(self._encode_sign_tokens_from_motion(cur_motion))
             else:
                 cur_tokens = motion_batch[i, :cur_len]
                 if cur_tokens.dim() == 0:
                     cur_tokens = cur_tokens.reshape(1)
-                motion_tokens.append(cur_tokens)
+                motion_tokens.append(cur_tokens.long())
         return motion_tokens
 
     def _resolve_eval_task_name(self, split: str, dataloader_idx: int = 0):
@@ -827,7 +832,6 @@ class MotionGPT(BaseModel):
         }
         return rs_set
 
-
     @torch.no_grad()
     def val_vae_forward(self, batch, split="train", stage=None):
         # Detach batch
@@ -927,7 +931,6 @@ class MotionGPT(BaseModel):
         }
 
         return rs_set
-    
 
     def allsplit_step(self, split: str, batch, batch_idx, dataloader_idx: int = 0):
         # Compute the losses
@@ -1035,7 +1038,7 @@ class MotionGPT(BaseModel):
             #         metrics_dicts = ['MMMetrics']
             #     else:
             #         metrics_dicts = self.hparams.metrics_dict
-                    
+
             #     if self.hparams.task not in ['pred', 'inbetween'] and 'PredMetrics' in metrics_dicts:
             #         metrics_dicts.remove('PredMetrics')
 
@@ -1082,7 +1085,7 @@ class MotionGPT(BaseModel):
             #     self.hparams.metrics_dict = metrics_dicts = ['M2TMetrics']
             #     for metric in metrics_dicts:
             #         if metric == "M2TMetrics":
-                        # print(rs_set["t_pred"], batch["all_captions"])
+            # print(rs_set["t_pred"], batch["all_captions"])
 
         # return forward output rather than loss during test
         if split in ["test"]:
@@ -1121,7 +1124,7 @@ class MotionGPT(BaseModel):
                     'lengths_rst': rs_set['lengths_rst'],
                     'text': batch_text,
                 }
-               
+
         return loss
 
     # def on_validation_epoch_end(self):
@@ -1138,4 +1141,3 @@ class MotionGPT(BaseModel):
     #         self.log_dict(dico, sync_dist=True, rank_zero_only=True)
     #         # print('dico', dico)
     #     # dist.barrier()
-        
