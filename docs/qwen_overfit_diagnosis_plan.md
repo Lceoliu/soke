@@ -27,8 +27,99 @@
 - `m2t` 的 label mask 正确：
   - 只监督 `<text> ... </text>` 内部的 text token
   - `sign` 区域和 task prefix 不参与 loss
+- 新增 token 的输入 embedding 与 `lm_head` 输出行都已验证会收到梯度并发生更新。
 
-### 1.3 当前 overfit 结果
+### 1.3 最终结论
+
+经过 `overfit1 / 4 / 12`、`synthetic probe`、`rhand-only`、`noaug`、`teacher-forced`、`first-token prob` 等实验后，当前结论已经收敛：
+
+1. **Qwen m2t 主链本身是能学会的。**
+   - `synthetic probe` 可以稳定 `4/4`；
+   - 修复后真实 `m2t overfit4` 已可成功；
+   - `m2t overfit12` 也已成功。
+
+2. **之前的 overfit 失败，主因不是“Qwen 不会学”，而是工程链路中的多处不一致/污染。**
+
+3. **真正起决定作用的根本原因有三类：**
+   - 训练/评估使用了不同 token 来源；
+   - 评估/诊断路径没有正确处理 `lengths`，把 padding 一起送进编码/生成；
+   - 所谓 overfit 训练实际上还带着随机 token-drop 增强。
+
+4. **“长 new token 序列 + 短 text supervision 天然学不会”这个解释不成立。**
+   - 因为在去掉链路错误后，真实长 sign token 序列也可以 overfit；
+   - synthetic 长前缀 probe 也能 overfit。
+
+### 1.4 根本原因
+
+#### 根因 1：训练/评估 token 来源不一致
+
+训练阶段 `lm_pretrain/lm_instruct` 使用的是 **预计算 `.npy` token**：
+- `mGPT/data/humanml/dataset_t2m_cb.py`
+- `mGPT/models/mgpt.py:train_lm_forward`
+
+而旧的 `val_m2t_forward()` / `inspect_m2t_predictions.py` 走的是 **原始 `feat133` -> VAE 重新编码** 路径：
+- `mGPT/data/humanml/dataset_t2m_eval.py`
+- `mGPT/models/mgpt.py:val_m2t_forward`
+
+这会导致：
+- 模型训练时看到的是预计算 token；
+- 验证/导出时看到的是重新编码 token；
+- 两者不完全一致时，生成结果会被错误归因为“模型没学会”。
+
+#### 根因 2：长度处理错误，把 padding 当真实 token/pose 用了
+
+这个问题有两层：
+
+1. **旧的 `val_m2t_forward()` 在重新编码前没有按 `lengths[i]` 截断 raw motion**
+   - padded frame 一起进入 VAE；
+   - 编出来的 sign token 被污染。
+
+2. **旧的 `diagnose_qwen_overfit.py` free-run `m2t` 没传 `lengths`**
+   - `[T_max, 3]` 的 padded token 直接整段参与 prompt 构造；
+   - 末尾的 padding token 被当成真实 sign token。
+
+这类 bug 会直接把本该成功的 overfit 结果拖成失败。
+
+#### 根因 3：overfit 实验默认带着随机 token-drop augmentation
+
+真实训练集 `Text2MotionDatasetCB` 里原本有：
+- 以一定概率从 token 序列头/尾删掉一整组 token
+
+这意味着：
+- 训练看到的输入并不是固定 4 条样本；
+- 所谓 overfit 其实是在带随机扰动的数据族上训练；
+- 这会显著削弱最小过拟合实验的诊断意义。
+
+关闭增强后的实验结果已经证明，这一步会明显改善坍缩。
+
+### 1.5 修复经验
+
+本轮修复可以总结成下面几条工程经验：
+
+1. **overfit 诊断必须保证训练路径和评估路径吃的是同一种 token。**
+   - 训练用预计算 token，评估/导出也必须优先用预计算 token；
+   - 不能一边训 cache token，一边测 VAE 在线重编码 token。
+
+2. **所有 `m2t` 生成路径都必须显式传入 `lengths`。**
+   - 不能依赖 padded batch 的形状；
+   - 不能让 `[T_max]` 或 `[T_max,3]` 直接整段参与 prompt 构造。
+
+3. **不能用 dtype 区分“raw feature” 和 “precomputed token”。**
+   - 因为 collate 可能把 token 也转成 `float`；
+   - 正确做法是按 shape/最后一维特征数区分。
+
+4. **overfit 配置必须关闭随机增强。**
+   - 否则实验在逻辑上就不是“固定样本记忆测试”。
+
+5. **自动导出脚本必须和训练 split 对齐。**
+   - `split=train` 就应该走 `train_dataloader()`；
+   - 不能默认绕回 `test_dataloader()` 或 raw-feature eval path。
+
+### 1.6 历史诊断记录
+
+下面的内容保留为诊断过程中的历史记录，用于追溯问题是如何一步步收敛出来的。
+
+### 1.6.1 历史 overfit 结果
 
 #### `m2t-only overfit12`
 - 训练 loss 已非常低，约在 `5e-5 ~ 1e-4`
@@ -135,7 +226,7 @@
   - 后续 `_decode_generated_motion_parts()` 把 `len(body_tokens) <= 1` 的结果回填成全零动作；
   - 自动可视化中的 `*_pred.npy` 出现 `(1,133)` 全零张量。
 
-### 1.4 当前最重要的判断
+### 1.6.2 历史阶段性判断
 仅根据 loss 和生成结果，最合理的判断不是“模型完全没学会”，而是：
 
 1. `m2t overfit1` 已经证明 teacher forcing 与自由生成在单样本上可以对齐；
@@ -143,7 +234,7 @@
 3. `t2m` 当前存在明确实现 bug，即训练-推理 prompt mismatch；
 4. 问题更像是“训练-推理不一致 / 生成约束实现错误 / 少样本下输入可分性不足”，而不是简单的“轮数不够”。
 
-### 1.5 sign token 相似度分析（4 条样本）
+### 1.6.3 sign token 相似度分析（4 条样本）
 - 分析目录：
   - `experiments/overfit_RE/SOKE_QWEN_CSL_OVERFIT4_M2T_RE/sign_token_similarity/summary.md`
 - 样本：
