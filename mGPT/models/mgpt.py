@@ -390,6 +390,20 @@ class MotionGPT(BaseModel):
         min_len = min(flat_body.shape[0], flat_hand.shape[0])
         return torch.stack([flat_body[:min_len], flat_hand[:min_len]], dim=-1)
 
+    def _build_eval_motion_tokens(self, motion_batch: torch.Tensor, lengths) -> List[torch.Tensor]:
+        motion_tokens = []
+        for i in range(len(motion_batch)):
+            cur_len = int(lengths[i])
+            cur_motion = motion_batch[i:i + 1, :cur_len]
+            if torch.is_floating_point(cur_motion):
+                motion_tokens.append(self._encode_sign_tokens_from_motion(cur_motion))
+            else:
+                cur_tokens = motion_batch[i, :cur_len]
+                if cur_tokens.dim() == 0:
+                    cur_tokens = cur_tokens.reshape(1)
+                motion_tokens.append(cur_tokens)
+        return motion_tokens
+
     def _resolve_eval_task_name(self, split: str, dataloader_idx: int = 0):
         if split != "val":
             return str(self.hparams.task).lower()
@@ -581,12 +595,11 @@ class MotionGPT(BaseModel):
         feats_ref = batch["motion"]
         texts = batch["text"]
         lengths = batch["length"]
-        motion_tokens = []
-        for i in range(len(feats_ref)):
-            motion_tokens.append(self._encode_sign_tokens_from_motion(feats_ref[i:i + 1]))
+        motion_tokens = self._build_eval_motion_tokens(feats_ref, lengths)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
+                                               lengths=lengths,
                                                task="m2t",
                                                stage='test',
                                                src=batch['src'],
@@ -608,12 +621,11 @@ class MotionGPT(BaseModel):
         feats_ref_full = batch["motion"]
         lengths_full = batch["length"]
         ratio = float(getattr(self.lm, "mc_prefix_ratio", 0.5))
-        motion_tokens = []
-        for i in range(len(feats_ref_full)):
-            motion_tokens.append(self._encode_sign_tokens_from_motion(feats_ref_full[i:i + 1]))
+        motion_tokens = self._build_eval_motion_tokens(feats_ref_full, lengths_full)
 
         gen_results = self.lm.generate_conditional(
             motion_tokens=motion_tokens,
+            lengths=lengths_full,
             task="mc",
             stage='test',
             src=batch['src'],

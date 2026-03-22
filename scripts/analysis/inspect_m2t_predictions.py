@@ -55,7 +55,6 @@ def main():
     pl.seed_everything(cfg.SEED_VALUE)
 
     datamodule = build_data(cfg)
-    datamodule.setup("test")
     model = build_model(cfg, datamodule)
     if cfg.TRAIN.PRETRAINED_VAE:
         load_pretrained_vae(cfg, model, logger=None)
@@ -65,10 +64,26 @@ def main():
     if torch.cuda.is_available():
         model = model.cuda(args.device)
 
+    if args.split == "train":
+        datamodule.setup("fit")
+        loader = datamodule.train_dataloader()
+    elif args.split == "val":
+        datamodule.setup("fit")
+        loader = datamodule.val_dataloader()
+        if isinstance(loader, list):
+            task_names = list(getattr(datamodule.hparams, "lm_val_tasks", []))
+            try:
+                loader = loader[task_names.index("m2t")]
+            except ValueError:
+                loader = loader[0]
+    else:
+        datamodule.setup("test")
+        loader = datamodule.test_dataloader()
+
     rows = []
     seen = 0
     with torch.no_grad():
-        for batch in datamodule.test_dataloader():
+        for batch in loader:
             if torch.cuda.is_available():
                 batch["motion"] = batch["motion"].cuda(args.device)
             rs = model.val_m2t_forward(batch)

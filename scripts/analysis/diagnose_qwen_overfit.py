@@ -166,6 +166,7 @@ def _free_run_metrics(model, task: str, texts: List[str], motion_batch: torch.Te
         motion_tokens = [motion_batch[i] for i in range(len(texts))]
         pred_texts = model.lm.generate_conditional(
             motion_tokens=motion_tokens,
+            lengths=lengths,
             task="m2t",
             stage="test",
             do_sample=False,

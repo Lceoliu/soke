@@ -103,6 +103,18 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
 
     checkpoint_dir = os.path.join(cfg.FOLDER_EXP, "checkpoints")
 
+    last_checkpoint_params = {
+        'dirpath': checkpoint_dir,
+        'filename': "{epoch}",
+        'monitor': "step",
+        'mode': "max",
+        'every_n_epochs': None,  #cfg.LOGGER.VAL_EVERY_STEPS,
+        'save_top_k': 0,
+        'save_last': True,
+        'save_on_train_epoch_end': False
+    }
+    callbacks.append(ModelCheckpoint(**last_checkpoint_params))
+
     checkpointParams = {
         'dirpath': checkpoint_dir,
         'filename': "{epoch}",
@@ -110,7 +122,7 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         'mode': "max",
         'every_n_epochs': None,  #cfg.LOGGER.VAL_EVERY_STEPS,
         'save_top_k': 1,
-        'save_last': True,
+        'save_last': False,
         'save_on_train_epoch_end': False
     }
 

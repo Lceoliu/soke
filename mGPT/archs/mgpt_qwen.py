@@ -242,7 +242,16 @@ class QwenCausalLM(nn.Module):
         )
         return sign_token_strings_to_ids(self.tokenizer, sign_tokens)
 
-    def _motion_tensor_to_sign_token_ids(self, motion_tokens: Tensor) -> List[int]:
+    def _motion_tensor_to_sign_token_ids(self, motion_tokens: Tensor, length: Optional[int] = None) -> List[int]:
+        if length is not None:
+            if motion_tokens.dim() == 0:
+                motion_tokens = motion_tokens.reshape(1)
+            elif motion_tokens.dim() in [1, 2]:
+                motion_tokens = motion_tokens[: int(length)]
+            else:
+                raise ValueError(
+                    f"Unsupported motion tensor shape for length-aware sign serialization: {tuple(motion_tokens.shape)}"
+                )
         if motion_tokens.dim() == 1:
             if self.sign_streams != ["body"]:
                 raise ValueError(
@@ -596,8 +605,11 @@ class QwenCausalLM(nn.Module):
                 raise ValueError("motion_tokens must be provided for m2t generation.")
             outputs: List[str] = []
             debug_rows = []
-            for cur_tokens in motion_tokens:
-                sign_token_ids = self._motion_tensor_to_sign_token_ids(cur_tokens)
+            for idx, cur_tokens in enumerate(motion_tokens):
+                cur_len = None
+                if lengths is not None:
+                    cur_len = int(lengths[idx])
+                sign_token_ids = self._motion_tensor_to_sign_token_ids(cur_tokens, length=cur_len)
                 prompt_ids = self._make_m2t_prompt(sign_token_ids)
                 output_ids = self._generate_ids(
                     prompt_ids,

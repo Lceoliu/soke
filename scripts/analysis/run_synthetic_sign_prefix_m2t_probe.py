@@ -138,7 +138,7 @@ PRESETS = {
                 '<debug_sign_151669>',
                 '<debug_sign_151670>',
             ],
-            "早上好！",
+            "对不起！",
         ),
         (
             [
@@ -187,7 +187,7 @@ PRESETS = {
                 '<debug_sign_151669>',
                 '<debug_sign_151670>',
             ],
-            "晚上好！",
+            "没关系！",
         ),
         (
             [
@@ -236,7 +236,7 @@ PRESETS = {
                 '<debug_sign_151669>',
                 '<debug_sign_151670>',
             ],
-            "再见！",
+            "谢谢！",
         ),
     ],
 }
@@ -286,6 +286,39 @@ def parse_args():
         "--strip_control_tokens",
         action="store_true",
         help="Strip debug tokens that mirror control ids 151666/151668/151669/151670.",
+    )
+    parser.add_argument(
+        "--apply_token_drop_aug",
+        action="store_true",
+        help="Apply the same head/tail token-drop augmentation used in real overfit training.",
+    )
+    parser.add_argument(
+        "--token_drop_prob",
+        type=float,
+        default=1.0 / 3.0,
+        help="Per-sample probability of applying token-drop augmentation.",
+    )
+    parser.add_argument(
+        "--token_drop_group_size",
+        type=int,
+        default=4,
+        help="Number of tokens to drop when augmentation is applied, matching real q_factor.",
+    )
+    parser.add_argument(
+        "--use_cosine_scheduler",
+        action="store_true",
+        help="Apply CosineAnnealingLR like the real overfit training config.",
+    )
+    parser.add_argument(
+        "--eta_min",
+        type=float,
+        default=1e-6,
+        help="CosineAnnealingLR eta_min.",
+    )
+    parser.add_argument(
+        "--use_bf16_autocast",
+        action="store_true",
+        help="Run training forward under CUDA bf16 autocast, matching bf16-mixed training.",
     )
     return parser.parse_args()
 
@@ -422,6 +455,21 @@ def build_optimizer(
     )
 
 
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    epochs: int,
+    use_cosine_scheduler: bool,
+    eta_min: float,
+):
+    if not use_cosine_scheduler:
+        return None
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=int(epochs),
+        eta_min=float(eta_min),
+    )
+
+
 def build_train_batch(
     model: QwenCausalLM,
     sign_ids: Sequence[Sequence[int]],
@@ -438,6 +486,44 @@ def build_train_batch(
         batch.attention_mask.to(device),
         batch.labels.to(device),
     )
+
+
+def build_autocast_context(device: torch.device, use_bf16_autocast: bool):
+    if not use_bf16_autocast:
+        return torch.autocast(device_type=str(device).split(":")[0], enabled=False)
+    if device.type != "cuda":
+        raise ValueError("bf16 autocast probe requires a CUDA device.")
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+
+def maybe_apply_token_drop_aug(
+    sign_id_sequences: Sequence[Sequence[int]],
+    enabled: bool,
+    drop_prob: float,
+    group_size: int,
+) -> List[List[int]]:
+    if not enabled:
+        return [list(map(int, seq)) for seq in sign_id_sequences]
+
+    drop_prob = float(max(0.0, min(1.0, drop_prob)))
+    group_size = int(max(1, group_size))
+    augmented: List[List[int]] = []
+    for seq in sign_id_sequences:
+        cur = list(map(int, seq))
+        if len(cur) == 0 or random.random() >= drop_prob:
+            augmented.append(cur)
+            continue
+        drop_count = group_size
+        if len(cur) <= drop_count:
+            drop_count = 1
+        if random.random() < 0.5:
+            cur = cur[:-drop_count]
+        else:
+            cur = cur[drop_count:]
+        if len(cur) == 0:
+            cur = list(map(int, seq))
+        augmented.append(cur)
+    return augmented
 
 
 def greedy_generate(model: QwenCausalLM, sign_token_ids: Sequence[int]) -> str:
@@ -534,26 +620,56 @@ def main():
         head_mult=args.lm_head_lr_mult,
         weight_decay=args.weight_decay,
     )
-
-    input_ids, attention_mask, labels = build_train_batch(
-        model, sign_id_sequences, texts, device
+    scheduler = build_scheduler(
+        optimizer=optimizer,
+        epochs=args.epochs,
+        use_cosine_scheduler=args.use_cosine_scheduler,
+        eta_min=args.eta_min,
     )
 
     losses: List[Dict[str, float]] = []
     for epoch in range(1, args.epochs + 1):
-        optimizer.zero_grad(set_to_none=True)
-        out = model.language_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True,
+        train_sign_ids = maybe_apply_token_drop_aug(
+            sign_id_sequences,
+            enabled=args.apply_token_drop_aug,
+            drop_prob=args.token_drop_prob,
+            group_size=args.token_drop_group_size,
         )
-        loss = out.loss
+        input_ids, attention_mask, labels = build_train_batch(
+            model, train_sign_ids, texts, device
+        )
+        optimizer.zero_grad(set_to_none=True)
+        with build_autocast_context(device, args.use_bf16_autocast):
+            out = model.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                return_dict=True,
+            )
+            loss = out.loss
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         cur_loss = float(loss.detach().item())
-        losses.append({"epoch": epoch, "loss": cur_loss})
+        losses.append(
+            {
+                "epoch": epoch,
+                "loss": cur_loss,
+                "lr_backbone": float(optimizer.param_groups[0]["lr"]),
+                "lr_embed": (
+                    float(optimizer.param_groups[1]["lr"])
+                    if len(optimizer.param_groups) > 1
+                    else float("nan")
+                ),
+                "lr_lm_head": (
+                    float(optimizer.param_groups[2]["lr"])
+                    if len(optimizer.param_groups) > 2
+                    else float("nan")
+                ),
+            }
+        )
         if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs:
             print(f"epoch={epoch} loss={cur_loss:.6e}")
 
@@ -592,6 +708,12 @@ def main():
         "device": str(device),
         "preset": args.preset,
         "strip_control_tokens": bool(args.strip_control_tokens),
+        "apply_token_drop_aug": bool(args.apply_token_drop_aug),
+        "token_drop_prob": float(args.token_drop_prob),
+        "token_drop_group_size": int(args.token_drop_group_size),
+        "use_cosine_scheduler": bool(args.use_cosine_scheduler),
+        "eta_min": float(args.eta_min),
+        "use_bf16_autocast": bool(args.use_bf16_autocast),
         "final_loss": float(losses[-1]["loss"]) if losses else math.nan,
         "exact_match_count": int(sum(int(x["gt"] == x["pred"]) for x in examples)),
         "count": len(examples),
