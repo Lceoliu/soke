@@ -111,7 +111,6 @@ def main():
     #     model = torch.compile(model, mode="reduce-overhead")
     # model = torch.compile(model)
 
-    print('tmax: ', cfg.TRAIN.LR_SCHEDULER.params.T_max)
     # Lightning Fitting
     if cfg.TRAIN.RESUME:
         trainer.fit(model,

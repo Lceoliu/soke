@@ -1,8 +1,9 @@
 import os
 import time
 from pathlib import Path
+import torch
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoint
+from pytorch_lightning.callbacks import Callback, TQDMProgressBar, ModelCheckpoint
 
 
 def build_callbacks(cfg, logger=None, phase='test', **kwargs):
@@ -14,13 +15,20 @@ def build_callbacks(cfg, logger=None, phase='test', **kwargs):
 
     # Checkpoint Callback
     if phase == 'train':
-        callbacks.append(FinalCheckpointCallback())
+        ckpt_cfg = cfg.TRAIN.get("CHECKPOINT", {})
+        if bool(ckpt_cfg.get("SAVE_ON_TRAIN_END", True)):
+            callbacks.append(FinalCheckpointCallback())
+        if bool(ckpt_cfg.get("SAVE_BEFORE_VAL", True)):
+            callbacks.append(PreValidationCheckpointCallback())
         callbacks.extend(getCheckpointCallback(cfg, logger=logger, **kwargs))
         
     return callbacks
 
 def getCheckpointCallback(cfg, logger=None, **kwargs):
     callbacks = []
+    ckpt_cfg = cfg.TRAIN.get("CHECKPOINT", {})
+    periodic_every_n_epochs = int(ckpt_cfg.get("PERIODIC_EVERY_N_EPOCHS", 5) or 0)
+    enable_rolling_last = bool(ckpt_cfg.get("ENABLE_ROLLING_LAST", True))
     # Logging
     metric_monitor = {
         "loss_total": "total/train",
@@ -103,17 +111,31 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
 
     checkpoint_dir = os.path.join(cfg.FOLDER_EXP, "checkpoints")
 
-    last_checkpoint_params = {
-        'dirpath': checkpoint_dir,
-        'filename': "{epoch}",
-        'monitor': "step",
-        'mode': "max",
-        'every_n_epochs': None,  #cfg.LOGGER.VAL_EVERY_STEPS,
-        'save_top_k': 0,
-        'save_last': True,
-        'save_on_train_epoch_end': False
-    }
-    callbacks.append(ModelCheckpoint(**last_checkpoint_params))
+    if enable_rolling_last:
+        last_checkpoint_params = {
+            'dirpath': checkpoint_dir,
+            'filename': "{epoch}",
+            'monitor': "step",
+            'mode': "max",
+            'every_n_epochs': None,
+            'save_top_k': 0,
+            'save_last': True,
+            'save_on_train_epoch_end': False
+        }
+        callbacks.append(ModelCheckpoint(**last_checkpoint_params))
+
+    if periodic_every_n_epochs > 0:
+        periodic_checkpoint_params = {
+            'dirpath': checkpoint_dir,
+            'filename': "epoch{epoch:04d}",
+            'monitor': "step",
+            'mode': "max",
+            'every_n_epochs': periodic_every_n_epochs,
+            'save_top_k': -1,
+            'save_last': False,
+            'save_on_train_epoch_end': True,
+        }
+        callbacks.append(ModelCheckpoint(**periodic_checkpoint_params))
 
     checkpointParams = {
         'dirpath': checkpoint_dir,
@@ -286,15 +308,110 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
                     ModelCheckpoint(**checkpointParams))
     return callbacks
 
-class progressBar(RichProgressBar):
-    def __init__(self, ):
-        super().__init__()
+class progressBar(TQDMProgressBar):
+    def __init__(self):
+        super().__init__(refresh_rate=1, process_position=0, leave=True)
+        self._train_epoch_start_time = None
+        self._val_epoch_start_time = None
+
+    @staticmethod
+    def _format_metric(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            value = value.detach().float().item()
+        try:
+            return f"{float(value):.3e}"
+        except Exception:
+            return None
+
+    def _maybe_disable_non_global_zero(self, trainer: Trainer) -> None:
+        if not getattr(trainer, "is_global_zero", True):
+            self.disable()
+
+    def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._maybe_disable_non_global_zero(trainer)
+        super().on_train_start(trainer, pl_module)
+
+    def on_validation_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._maybe_disable_non_global_zero(trainer)
+        super().on_validation_start(trainer, pl_module)
+
+    def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._maybe_disable_non_global_zero(trainer)
+        super().on_test_start(trainer, pl_module)
+
+    def on_predict_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._maybe_disable_non_global_zero(trainer)
+        super().on_predict_start(trainer, pl_module)
 
     def get_metrics(self, trainer, model):
         # Don't show the version number
         items = super().get_metrics(trainer, model)
         items.pop("v_num", None)
         return items
+
+    def _build_train_description(self, trainer: Trainer) -> str:
+        epoch = int(trainer.current_epoch)
+        max_epochs = int(trainer.max_epochs) if trainer.max_epochs is not None else None
+        desc = f"Train E{epoch}"
+        if max_epochs is not None and max_epochs > 0:
+            desc += f"/{max_epochs - 1}"
+        if self._train_epoch_start_time is not None:
+            elapsed_min = (time.perf_counter() - self._train_epoch_start_time) / 60.0
+            desc += f" [{elapsed_min:.1f}m]"
+        train_loss = self._format_metric(trainer.callback_metrics.get("total/train", None))
+        if train_loss is not None:
+            desc += f" loss {train_loss}"
+        return desc
+
+    def _build_val_description(self, trainer: Trainer) -> str:
+        epoch = int(trainer.current_epoch)
+        max_epochs = int(trainer.max_epochs) if trainer.max_epochs is not None else None
+        desc = f"Val E{epoch}"
+        if max_epochs is not None and max_epochs > 0:
+            desc += f"/{max_epochs - 1}"
+        if self._val_epoch_start_time is not None:
+            elapsed_min = (time.perf_counter() - self._val_epoch_start_time) / 60.0
+            desc += f" [{elapsed_min:.1f}m]"
+        return desc
+
+    def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._train_epoch_start_time = time.perf_counter()
+        super().on_train_epoch_start(trainer, pl_module)
+        if getattr(self, "train_progress_bar", None) is not None:
+            self.train_progress_bar.set_description(self._build_train_description(trainer))
+
+    def on_train_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs,
+        batch,
+        batch_idx: int,
+    ) -> None:
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+        if getattr(self, "train_progress_bar", None) is not None:
+            self.train_progress_bar.set_description(self._build_train_description(trainer))
+
+    def on_validation_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._val_epoch_start_time = time.perf_counter()
+        super().on_validation_epoch_start(trainer, pl_module)
+        if getattr(self, "val_progress_bar", None) is not None:
+            self.val_progress_bar.set_description(self._build_val_description(trainer))
+
+    def on_validation_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs,
+        batch,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        super().on_validation_batch_end(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx)
+        if getattr(self, "val_progress_bar", None) is not None:
+            self.val_progress_bar.set_description(self._build_val_description(trainer))
 
 class progressLogger(Callback):
     def __init__(self,
@@ -311,16 +428,26 @@ class progressLogger(Callback):
         self._train_epoch_start_time = None
         self._val_epoch_start_time = None
 
+    @staticmethod
+    def _should_log(trainer: Trainer) -> bool:
+        return bool(getattr(trainer, "is_global_zero", True))
+
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule,
                        **kwargs) -> None:
+        if not self._should_log(trainer):
+            return
         self.logger.info("Training started")
 
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule,
                      **kwargs) -> None:
+        if not self._should_log(trainer):
+            return
         self.logger.info("Training done")
 
     def on_validation_epoch_end(self, trainer: Trainer,
                                 pl_module: LightningModule, **kwargs) -> None:
+        if not self._should_log(trainer):
+            return
         if trainer.sanity_checking:
             self.logger.info("Sanity checking ok.")
             return
@@ -372,38 +499,20 @@ class progressLogger(Callback):
                            pl_module: LightningModule,
                            padding=False,
                            **kwargs) -> None:
-        metric_format = f"{{:.{self.precision}e}}"
-        train_duration = None
-        if self._train_epoch_start_time is not None:
-            train_duration = time.perf_counter() - self._train_epoch_start_time
-        line = f"Train Epoch {trainer.current_epoch}"
-        if padding:
-            line = f"{line:>{len('Train Epoch xxxx')}}"  # Right padding
-
-        if trainer.current_epoch % self.log_every_n_steps == 0:
-            metrics_str = []
-
-            losses_dict = trainer.callback_metrics
-            for metric_name, dico_name in self.metric_monitor.items():
-                if self._is_validation_metric(dico_name):
-                    continue
-                if dico_name not in losses_dict:
-                    continue
-                metric = losses_dict[dico_name].item()
-                metric = metric_format.format(metric)
-                metrics_str.append(f"{metric_name} {metric}")
-
-            if train_duration is not None:
-                line += f" [{train_duration / 60.0:.1f} min]"
-            if metrics_str:
-                line += ": " + "   ".join(metrics_str)
-
-        self.logger.info(line)
         self._train_epoch_start_time = None
 
 
 class FinalCheckpointCallback(Callback):
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule, **kwargs) -> None:
+        ckpt_dir = Path(trainer.default_root_dir) / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        trainer.save_checkpoint(str(ckpt_dir / "last.ckpt"), weights_only=False)
+
+
+class PreValidationCheckpointCallback(Callback):
+    def on_validation_epoch_start(self, trainer: Trainer, pl_module: LightningModule, **kwargs) -> None:
+        if trainer.sanity_checking:
+            return
         ckpt_dir = Path(trainer.default_root_dir) / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         trainer.save_checkpoint(str(ckpt_dir / "last.ckpt"), weights_only=False)

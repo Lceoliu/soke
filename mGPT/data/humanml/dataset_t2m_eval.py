@@ -28,19 +28,53 @@ class Text2MotionDatasetEval(Text2MotionDataset):
                          min_motion_length, unit_length, fps, tmpFile, tiny,
                          debug, dataset_name=dataset_name, **kwargs)
 
+        self.data_root = data_root
         self.w_vectorizer = w_vectorizer
+        self.code_path = kwargs.get('code_path', None)
+        self.lm_token_num_quantizers = int(kwargs.get("lm_token_num_quantizers", 1))
+        self.lm_token_num_parts = int(kwargs.get("lm_token_num_parts", 1))
+
+    def _flatten_motion_tokens(self, m_tokens):
+        tokens = np.asarray(m_tokens)
+        if tokens.ndim == 3:
+            t, q, p = tokens.shape
+            return tokens.reshape(t * q, p), int(q)
+        if tokens.ndim == 2:
+            if self.lm_token_num_parts > 1 and int(tokens.shape[1]) == int(self.lm_token_num_parts):
+                q_hint = max(int(self.lm_token_num_quantizers), 1)
+                return tokens, q_hint
+            t, q = tokens.shape
+            return tokens.reshape(t * q), int(q)
+        q_hint = max(int(self.lm_token_num_quantizers), 1)
+        return tokens, q_hint
 
 
     def __getitem__(self, idx):
         sample = self.all_data[idx]
         src = sample['src']
 
+        code = None
         if src == 'how2sign':
-            clip_poses, text, name, _ = load_h2s_sample(sample, self.data_dir)
+            clip_poses, text, name, code = load_h2s_sample(
+                sample,
+                self.data_dir,
+                code_path=os.path.join(self.data_root, self.code_path) if self.code_path else None,
+                need_code=bool(self.code_path),
+            )
         elif src == 'csl':
-            clip_poses, text, name, _ = load_csl_sample(sample, self.csl_root)
+            clip_poses, text, name, code = load_csl_sample(
+                sample,
+                self.csl_root,
+                code_path=os.path.join(self.data_root, self.code_path) if self.code_path else None,
+                need_code=bool(self.code_path),
+            )
         elif src == 'phoenix':
-            clip_poses, text, name, _ = load_phoenix_sample(sample, self.phoenix_root)
+            clip_poses, text, name, code = load_phoenix_sample(
+                sample,
+                self.phoenix_root,
+                code_path=os.path.join(self.data_root, self.code_path) if self.code_path else None,
+                need_code=bool(self.code_path),
+            )
         
         all_captions = [text]
         all_captions = all_captions * 3  #?
@@ -60,6 +94,29 @@ class Text2MotionDatasetEval(Text2MotionDataset):
             clip_poses = clip_poses[idx:idx + m_length]
         m_length = clip_poses.shape[0]
 
+        token_tensor = None
+        token_length = 0
+        if code is not None:
+            code, q_factor = self._flatten_motion_tokens(code)
+            # Match Text2MotionDatasetCB exactly so LM train/val/test consume
+            # token sequences clipped with the same rules.
+            min_motion_len = self.min_motion_length * q_factor
+            max_motion_len = self.max_motion_length * q_factor
+            code_length = code.shape[0]
+            if code_length < min_motion_len:
+                idx = np.linspace(0, code_length - 1, num=min_motion_len, dtype=int)
+                code = code[idx]
+            elif code_length > max_motion_len:
+                idx = np.linspace(0, code_length - 1, num=max_motion_len, dtype=int)
+                code = code[idx]
+            else:
+                crop_unit = int(np.lcm(int(self.unit_length), int(max(q_factor, 1))))
+                code_length = (code_length // crop_unit) * crop_unit
+                idx = (code.shape[0] - code_length) // 2
+                code = code[idx:idx + code_length]
+            token_length = int(code.shape[0])
+            token_tensor = torch.from_numpy(code).long()
+
         # Text
         tokens = text.split(' ')
         max_text_len = 40
@@ -74,7 +131,7 @@ class Text2MotionDatasetEval(Text2MotionDataset):
             tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
             sent_len = len(tokens)
 
-        return text, torch.from_numpy(clip_poses).float(), m_length, name, None, None, "_".join(tokens), all_captions, None, src
+        return text, torch.from_numpy(clip_poses).float(), m_length, name, None, None, "_".join(tokens), all_captions, None, src, token_tensor, token_length
 
 
 def sample(input,count):

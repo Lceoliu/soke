@@ -58,7 +58,10 @@ class BASEDataModule(pl.LightningDataModule):
     def val_dataset(self):
         if self._val_dataset is None:
             params = self.hparams.copy()
-            params['code_path'] = None
+            if str(self.cfg.TRAIN.STAGE).startswith("lm"):
+                params['code_path'] = getattr(self.hparams, 'code_path', None)
+            else:
+                params['code_path'] = None
             params['split'] = self.cfg.EVAL.SPLIT
             self._val_dataset = self.DatasetEval(**params)
         return self._val_dataset
@@ -69,7 +72,10 @@ class BASEDataModule(pl.LightningDataModule):
             # self._test_dataset = self.DatasetEval(split=self.cfg.TEST.SPLIT,
             #                                       **self.hparams)
             params = self.hparams.copy()
-            params['code_path'] = None
+            if str(self.cfg.TRAIN.STAGE).startswith("lm"):
+                params['code_path'] = getattr(self.hparams, 'code_path', None)
+            else:
+                params['code_path'] = None
             params['split'] = self.cfg.TEST.SPLIT
             self._test_dataset = self.DatasetEval( **params)
         return self._test_dataset

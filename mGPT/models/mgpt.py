@@ -243,12 +243,30 @@ class MotionGPT(BaseModel):
         return outputs
 
     def train_lm_forward(self, batch, forced_task=None):
-        tokens_ref = batch["motion"]
+        has_precomputed_tokens = "motion_tokens" in batch and batch["motion_tokens"] is not None
+        tokens_ref = batch["motion_tokens"] if has_precomputed_tokens else batch["motion"]
         texts = batch["text"]
-        lengths = batch["length"]
+        lengths = batch["motion_token_length"] if has_precomputed_tokens else batch["length"]
         tasks = batch["tasks"]
         all_captions = batch['all_captions']
-        tokens_ref, lengths = self._flatten_batch_tokens_for_lm(tokens_ref, lengths)
+        expected_nfeats = int(
+            getattr(
+                self.datamodule,
+                "nfeats",
+                getattr(self.hparams.cfg.DATASET, "NFEATS", 133),
+            )
+        )
+        is_raw_feature_batch = (
+            not has_precomputed_tokens
+            and
+            torch.is_tensor(tokens_ref)
+            and tokens_ref.dim() == 3
+            and int(tokens_ref.shape[-1]) == expected_nfeats
+        )
+        if is_raw_feature_batch:
+            tokens_ref = self._build_eval_motion_tokens(tokens_ref, lengths)
+        else:
+            tokens_ref, lengths = self._flatten_batch_tokens_for_lm(tokens_ref, lengths)
         if self.hparams.condition == 'caption':
             texts = [random.choice(all_captions[i]) for i in range(len(texts))]
         if forced_task is not None:
@@ -606,8 +624,12 @@ class MotionGPT(BaseModel):
     def val_m2t_forward(self, batch):
         feats_ref = batch["motion"]
         texts = batch["text"]
-        lengths = batch["length"]
-        motion_tokens = self._build_eval_motion_tokens(feats_ref, lengths)
+        if "motion_tokens" in batch and batch["motion_tokens"] is not None:
+            motion_tokens = self._build_eval_motion_tokens(batch["motion_tokens"], batch["motion_token_length"])
+            lengths = batch["motion_token_length"]
+        else:
+            lengths = batch["length"]
+            motion_tokens = self._build_eval_motion_tokens(feats_ref, lengths)
 
         # Forward
         outputs = self.lm.generate_conditional(motion_tokens=motion_tokens,
@@ -631,9 +653,13 @@ class MotionGPT(BaseModel):
     @torch.no_grad()
     def val_mc_forward(self, batch):
         feats_ref_full = batch["motion"]
-        lengths_full = batch["length"]
+        if "motion_tokens" in batch and batch["motion_tokens"] is not None:
+            motion_tokens = self._build_eval_motion_tokens(batch["motion_tokens"], batch["motion_token_length"])
+            lengths_full = batch["motion_token_length"]
+        else:
+            lengths_full = batch["length"]
+            motion_tokens = self._build_eval_motion_tokens(feats_ref_full, lengths_full)
         ratio = float(getattr(self.lm, "mc_prefix_ratio", 0.5))
-        motion_tokens = self._build_eval_motion_tokens(feats_ref_full, lengths_full)
 
         gen_results = self.lm.generate_conditional(
             motion_tokens=motion_tokens,

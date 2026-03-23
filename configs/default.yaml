@@ -8,6 +8,11 @@ TRAIN:
   NUM_WORKERS: 16 # Number of workers
   BATCH_SIZE: 8 # Size of batches
   END_EPOCH: 2000 # End epoch
+  CHECKPOINT:
+    PERIODIC_EVERY_N_EPOCHS: 5
+    SAVE_BEFORE_VAL: true
+    SAVE_ON_TRAIN_END: true
+    ENABLE_ROLLING_LAST: true
 
   RESUME: '' # Experiment path to be resumed training
   PRETRAINED_VAE: '' # Pretrained vae/vqvae model path

@@ -84,26 +84,7 @@ def main():
     if cfg.ACCELERATOR == "gpu":
         model = model.to('cuda')
 
-    skip_existing = os.environ.get("SKIP_EXISTING_TOKENS", "1") == "1"
-    overwrite_meta = os.environ.get("OVERWRITE_TOKEN_META", "1") == "1"
-    num_done = 0
-    num_skipped_existing = 0
-    for batch in tqdm(datasets.train_dataloader(),
-                      desc=f'motion tokenize'):
-        name = batch['text']
-        src = batch['src'][0]
-        output_dir = os.path.join(datasets.hparams.data_root, cfg.DATASET.CODE_PATH, src)
-        target_path = os.path.join(output_dir, name[0] + '.npy')
-        Path(target_path).parent.mkdir(parents=True, exist_ok=True)
-        if skip_existing and os.path.exists(target_path):
-            num_skipped_existing += 1
-            continue
-
-        pose = batch['motion']
-        pose = pose.cuda().float()
-        if pose.shape[1] == 0:
-            continue
-
+    def encode_pose_batch(pose: torch.Tensor):
         if hasattr(model, 'hand_vae') and hasattr(model, 'rhand_vae'):
             pose_lhand = pose[..., 30:75]
             pose_rhand = pose[..., 75:120]
@@ -119,7 +100,7 @@ def main():
             target_lhand, _ = flatten_token_levels(target_lhand, q_keep=q_shared)
             target_rhand, _ = flatten_token_levels(target_rhand, q_keep=q_shared)
             min_len = min(target_re.shape[1], target_lhand.shape[1], target_rhand.shape[1])
-            target = np.stack(
+            return np.stack(
                 [
                     target_re[:, :min_len].to('cpu').numpy(),
                     target_lhand[:, :min_len].to('cpu').numpy(),
@@ -127,9 +108,6 @@ def main():
                 ],
                 axis=-1,
             )
-            # save_data[name[0]] = {'body': target_re.to('cpu').numpy()[0].tolist(), 
-            #                       'lhand': target_lhand.to('cpu').numpy()[0].tolist(), 
-            #                       'rhand': target_rhand.to('cpu').numpy()[0].tolist()}
         else:
             if hasattr(model, 'hand_vae'):
                 pose_hand = pose[..., 30:120]
@@ -142,14 +120,41 @@ def main():
                 target_re, _ = flatten_token_levels(target_re, q_keep=q_shared)
                 target_hand, _ = flatten_token_levels(target_hand, q_keep=q_shared)
                 min_len = min(target_re.shape[1], target_hand.shape[1])
-                target = np.stack([target_re[:, :min_len].to('cpu').numpy(), target_hand[:, :min_len].to('cpu').numpy()], axis=-1)
+                return np.stack([target_re[:, :min_len].to('cpu').numpy(), target_hand[:, :min_len].to('cpu').numpy()], axis=-1)
             else:
                 target, _ = model.vae.encode(pose)
                 target, _ = flatten_token_levels(target)
-                target = target.to('cpu').numpy()
+                return target.to('cpu').numpy()
 
-        np.save(target_path, target)
-        num_done += 1
+    skip_existing = os.environ.get("SKIP_EXISTING_TOKENS", "1") == "1"
+    overwrite_meta = os.environ.get("OVERWRITE_TOKEN_META", "1") == "1"
+    num_done = 0
+    num_skipped_existing = 0
+    datasets.setup(None)
+    split_loaders = [
+        ("train", datasets.train_dataloader()),
+        ("val", datasets.val_dataloader()),
+        ("test", datasets.test_dataloader()),
+    ]
+    for split_name, loader in split_loaders:
+        for batch in tqdm(loader, desc=f'motion tokenize ({split_name})'):
+            name = batch['text']
+            src = batch['src'][0]
+            output_dir = os.path.join(datasets.hparams.data_root, cfg.DATASET.CODE_PATH, src)
+            target_path = os.path.join(output_dir, name[0] + '.npy')
+            Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+            if skip_existing and os.path.exists(target_path):
+                num_skipped_existing += 1
+                continue
+
+            pose = batch['motion']
+            pose = pose.cuda().float()
+            if pose.shape[1] == 0:
+                continue
+
+            target = encode_pose_batch(pose)
+            np.save(target_path, target)
+            num_done += 1
 
     if overwrite_meta:
         with open(meta_path, "w", encoding="utf-8") as f:

@@ -70,6 +70,23 @@ def humanml3d_collate(batch):
     if len(notnone_batches[0]) >= 9:
         adapted_batch.update({"tasks": [b[8] for b in notnone_batches]})
 
+    if len(notnone_batches[0]) >= 12:
+        has_any_motion_tokens = any(b[10] is not None for b in notnone_batches)
+        if has_any_motion_tokens:
+            motion_tokens = []
+            motion_token_length = []
+            for b in notnone_batches:
+                if b[10] is None:
+                    motion_tokens.append(torch.zeros((0,), dtype=torch.long))
+                    motion_token_length.append(0)
+                else:
+                    motion_tokens.append(torch.as_tensor(b[10]).long())
+                    motion_token_length.append(int(b[11]))
+            adapted_batch.update({
+                "motion_tokens": collate_tensors(motion_tokens),
+                "motion_token_length": motion_token_length,
+            })
+
     # Optional precomputed contact labels, shape [B, T, 3]
     if (not EvalFlag) and len(notnone_batches[0]) >= 5:
         has_any_contact = any(b[4] is not None for b in notnone_batches)
