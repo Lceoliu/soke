@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torch
 from pathlib import Path
 from tqdm import tqdm
+from torch.utils.data import DataLoader
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -131,12 +132,32 @@ def main():
     num_done = 0
     num_skipped_existing = 0
     datasets.setup(None)
-    split_loaders = [
-        ("train", datasets.train_dataloader()),
-        ("val", datasets.val_dataloader()),
-        ("test", datasets.test_dataloader()),
-    ]
-    for split_name, loader in split_loaders:
+    # Build token datasets explicitly for each split instead of reusing val/test
+    # dataloaders. This avoids eval-time subsetting and guarantees that token cache
+    # generation covers the full train/val/test corpus.
+    dataset_cls = datasets.Dataset
+    split_loaders = []
+    for split_name in ["train", "val", "test"]:
+        split_params = datasets.hparams.copy()
+        split_params["split"] = split_name
+        split_dataset = dataset_cls(**split_params)
+        split_loaders.append((
+            split_name,
+            DataLoader(
+                split_dataset,
+                batch_size=1,
+                shuffle=False,
+                num_workers=cfg.TEST.NUM_WORKERS if split_name != "train" else cfg.TRAIN.NUM_WORKERS,
+                collate_fn=datasets.dataloader_options["collate_fn"],
+                persistent_workers=(
+                    int(cfg.TEST.NUM_WORKERS if split_name != "train" else cfg.TRAIN.NUM_WORKERS) > 0
+                ),
+            ),
+            split_dataset,
+        ))
+
+    missing_by_split = {}
+    for split_name, loader, split_dataset in split_loaders:
         for batch in tqdm(loader, desc=f'motion tokenize ({split_name})'):
             name = batch['text']
             src = batch['src'][0]
@@ -156,9 +177,23 @@ def main():
             np.save(target_path, target)
             num_done += 1
 
+        split_missing = []
+        for sample in split_dataset.all_data:
+            src = sample["src"]
+            name = sample["name"]
+            target_path = os.path.join(datasets.hparams.data_root, cfg.DATASET.CODE_PATH, src, f"{name}.npy")
+            if not os.path.exists(target_path):
+                split_missing.append(name)
+        missing_by_split[split_name] = split_missing
+
     if overwrite_meta:
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(cache_meta, f, indent=2, ensure_ascii=True)
+
+    for split_name, missing in missing_by_split.items():
+        print(f"{split_name} missing token files: {len(missing)}")
+        if missing:
+            print(f"{split_name} missing preview: {missing[:10]}")
 
     print(
         f"Motion tokenization done. saved={num_done}, skipped_existing={num_skipped_existing}, "

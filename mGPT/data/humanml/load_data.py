@@ -14,6 +14,19 @@ keys = ['smplx_root_pose',
     ]
 
 
+def _try_load_code(code_path, dataset_subdir, name):
+    if not code_path:
+        return None
+    candidates = [
+        os.path.join(code_path, dataset_subdir, f"{name}.npy"),
+        os.path.join(code_path, f"{name}.npy"),
+    ]
+    for fname in candidates:
+        if os.path.exists(fname):
+            return np.load(fname)[0]
+    return None
+
+
 def load_h2s_sample(ann, data_dir, need_pose=True, code_path=None, need_code=False):
     name = ann['name']
     if 'split' in ann:
@@ -63,12 +76,7 @@ def load_h2s_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
     
     code = None
     if need_code:
-        try:
-            fname = os.path.join(code_path, 'how2sign', f'{name}.npy')
-            code = np.load(fname)[0]
-        except:
-            fname = os.path.join(code_path, f'{name}.npy')
-            code = np.load(fname)[0]
+        code = _try_load_code(code_path, 'how2sign', name)
 
     return clip_poses, clip_text, name, code
 
@@ -96,12 +104,7 @@ def load_csl_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
 
     code = None
     if need_code:
-        try:
-            fname = os.path.join(code_path, 'csl', f'{name}.npy')
-            code = np.load(fname)[0]
-        except:
-            fname = os.path.join(code_path, f'{name}.npy')
-            code = np.load(fname)[0]
+        code = _try_load_code(code_path, 'csl', name)
 
     return clip_poses, clip_text, name, code
 
@@ -146,17 +149,12 @@ def load_iso_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
 
     code = None
     if need_code:
-        try:
-            if dataset == 'csl_iso':
-                fname = os.path.join(code_path, 'csl', f'{name}.npy')
-            elif dataset == 'phoenix_iso':
-                fname = os.path.join(code_path, 'phoenix', f'{name}.npy')
-            elif dataset == 'how2sign_iso':
-                fname = os.path.join(code_path, 'how2sign', f'{name}.npy')
-            code = np.load(fname)[0]
-        except:
-            fname = os.path.join(code_path, f'{name}.npy')
-            code = np.load(fname)[0]
+        if dataset == 'csl_iso':
+            code = _try_load_code(code_path, 'csl', name)
+        elif dataset == 'phoenix_iso':
+            code = _try_load_code(code_path, 'phoenix', name)
+        elif dataset == 'how2sign_iso':
+            code = _try_load_code(code_path, 'how2sign', name)
 
     return clip_poses, clip_text, name, code
 
@@ -184,12 +182,7 @@ def load_phoenix_sample(ann, data_dir, need_pose=True, code_path=None, need_code
 
     code = None
     if need_code:
-        try:
-            fname = os.path.join(code_path, 'phoenix', f'{name}.npy')
-            code = np.load(fname)[0]
-        except:
-            fname = os.path.join(code_path, f'{name}.npy')
-            code = np.load(fname)[0]
+        code = _try_load_code(code_path, 'phoenix', name)
 
     return clip_poses, clip_text, name, code
 
@@ -197,5 +190,4 @@ def load_phoenix_sample(ann, data_dir, need_pose=True, code_path=None, need_code
 def sample(input,count):
     ss=float(len(input))/count
     return [ input[int(math.floor(i*ss))] for i in range(count) ]
-
 

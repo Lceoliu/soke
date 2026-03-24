@@ -96,6 +96,11 @@ class Text2MotionDatasetEval(Text2MotionDataset):
 
         token_tensor = None
         token_length = 0
+        if self.code_path and code is None:
+            raise FileNotFoundError(
+                f"Missing precomputed motion token cache for sample '{name}' under code_path='{self.code_path}'. "
+                "Regenerate train/val/test token cache before LM evaluation."
+            )
         if code is not None:
             code, q_factor = self._flatten_motion_tokens(code)
             # Match Text2MotionDatasetCB exactly so LM train/val/test consume
