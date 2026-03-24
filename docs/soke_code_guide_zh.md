@@ -112,6 +112,12 @@ LM 读取时支持多层 token（展平前可为 `[T, Q, P]` 或等价结构）�
 6. LM 下游新增一键脚本，自动训练 + BLEU eval + t2m 可视化。
 7. 修复 `m2t` 测试阶段返回兼容问题，避免自动评估崩溃。
 8. `scripts/get_motion_code.py` 已清理调试 shape 输出并修复模块导入路径。
+9. **Resume 机制重构**（`mGPT/config.py` + `mGPT/utils/logger.py` + `train.py`）：
+   - `TRAIN.RESUME` 和 `TRAIN.PRETRAINED` 语义明确化，两者互斥。
+   - Resume 时自动从实验目录加载原始训练 config，仅允许白名单 key 覆盖。
+   - Resume 时 LR scheduler `T_max` 自动与 `END_EPOCH` 同步。
+   - Resume 时保留当前 `DATASET` 块，支持跨机器/挂载点恢复训练。
+   - 新实验不再误用旧 config 中遗留的 `FOLDER_EXP`。
 
 ---
 
@@ -155,9 +161,68 @@ bash scripts/pipeline/train_vae_finetune_sign_lfq4_fkhand_body_pretrained_ddp.sh
 
 ---
 
-## 6. 下游 LM 训练与自动评估
+## 6. 断点续训（Resume）
 
-### 6.1 一键脚本（推荐）
+### 6.1 概念
+
+训练入口 `train.py` 支持两种 checkpoint 加载方式（互斥）：
+
+| 配置项 | 作用 | 加载内容 |
+|--------|------|----------|
+| `TRAIN.RESUME` | 断点续训 | 权重 + 优化器 + LR scheduler + epoch 等全部状态 |
+| `TRAIN.PRETRAINED` | 权重初始化 | 仅加载模型权重，训练从 epoch 0 开始 |
+
+两者不可同时设置，否则会报 `ValueError`。
+
+### 6.2 Resume 机制详解（`mGPT/config.py: resume_config`）
+
+当 `TRAIN.RESUME` 非空时，`resume_config()` 会：
+
+1. **从 checkpoint 路径推断实验目录**：`<exp_dir>/checkpoints/last.ckpt` → `<exp_dir>/`
+2. **加载原始训练 config**：读取 `<exp_dir>/config_*_train.yaml`（取最新的一份）
+3. **应用安全覆盖**：只有白名单中的 key 允许从当前 CLI config 覆盖到原始 config：
+   - 硬件相关：`USE_GPUS`, `DEVICE`, `NUM_NODES`, `PRECISION`, `ACCELERATOR`
+   - 训练调度：`TRAIN.END_EPOCH`, `TRAIN.BATCH_SIZE`, `TRAIN.NUM_WORKERS`, `TRAIN.ACCUMULATE_GRAD_BATCHES`
+   - 评估相关：`EVAL.BATCH_SIZE`, `EVAL.DISABLE_VAL`, `LOGGER.VAL_EVERY_STEPS` 等
+4. **同步 LR scheduler**：如果 `TRAIN.END_EPOCH` 被覆盖，自动同步 `TRAIN.LR_SCHEDULER.params.T_max`
+5. **保留当前 DATASET 块**：整个 `DATASET` 配置取自当前运行的 config，支持跨机器/挂载点恢复
+6. **恢复 wandb run ID**：从 `<exp_dir>/wandb/latest-run/` 自动提取，实现日志无缝续接
+7. **设置 FOLDER_EXP**：指向原实验目录，确保 checkpoint 和日志写回同一位置
+
+### 6.3 通过脚本 Resume
+
+**Qwen 下游脚本**（`scripts/pipeline/train_qwen_downstream_auto.sh`）：
+
+```bash
+RESUME_CKPT=experiments/mgpt/SOKE_QWEN_LM/checkpoints/last.ckpt \
+END_EPOCH=200 \
+GPU_IDS=0,1,2,3 \
+bash scripts/pipeline/train_qwen_downstream_auto.sh
+```
+
+**mBART 下游脚本**（`scripts/pipeline/train_lm_downstream_auto.sh`）：
+
+```bash
+RESUME_CKPT=experiments/mgpt/SOKE_LFQ4_ACC_LM/checkpoints/last.ckpt \
+END_EPOCH=200 \
+bash scripts/pipeline/train_lm_downstream_auto.sh
+```
+
+脚本内部会将 `RESUME_CKPT` 设为 `cfg.TRAIN.RESUME`，并清空 `cfg.TRAIN.PRETRAINED`。
+
+### 6.4 注意事项
+
+- `TRAIN.RESUME` 必须指向 **checkpoint 文件**（如 `last.ckpt`），不是实验目录。
+- Resume 时不需要手动指定 `EXP_NAME`——实验目录从 checkpoint 路径自动推断。
+- 如果需要修改 `END_EPOCH`，LR scheduler 的 `T_max` 会自动同步，无需手动设置。
+- 如果需要跨机器 resume，只需确保当前 config 中的数据集路径（`DATASET.H2S.ROOT` 等）正确即可。
+- 新实验（非 resume）即使使用了包含 `FOLDER_EXP` 的旧 config yaml 作为基础，也会正确生成新的实验目录。
+
+---
+
+## 7. 下游 LM 训练与自动评估
+
+### 7.1 一键脚本（推荐）
 
 脚本：`scripts/pipeline/train_lm_downstream_auto.sh`
 
@@ -191,7 +256,7 @@ AUTO_EVAL_BLEU=1 AUTO_VIS=1 \
 bash scripts/pipeline/train_lm_downstream_auto.sh
 ```
 
-### 6.2 关键输出目录
+### 7.2 关键输出目录
 
 - 训练实验：`experiments/mgpt/<EXP_NAME>`
 - 测试预测：`results/mgpt/<EXP_NAME>/<split>_rank_*`
@@ -202,9 +267,9 @@ bash scripts/pipeline/train_lm_downstream_auto.sh
 
 ---
 
-## 7. 手动 eval（按任务）
+## 8. 手动 eval（按任务）
 
-### 7.1 m2t（BLEU/ROUGE）
+### 8.1 m2t（BLEU/ROUGE）
 
 ```bash
 python test.py --cfg <eval_cfg.yaml> --nodebug --task m2t --use_gpus 0 --device 0
@@ -214,7 +279,7 @@ python test.py --cfg <eval_cfg.yaml> --nodebug --task m2t --use_gpus 0 --device 
 - `model.params.task = m2t`
 - `METRIC.TYPE = [M2TMetrics]`
 
-### 7.2 t2m（DTW/动作指标）
+### 8.2 t2m（DTW/动作指标）
 
 ```bash
 python test.py --cfg <eval_cfg.yaml> --nodebug --task t2m --use_gpus 0 --device 0
@@ -226,17 +291,19 @@ python test.py --cfg <eval_cfg.yaml> --nodebug --task t2m --use_gpus 0 --device 
 
 ---
 
-## 8. 协作改动建议（避免踩坑）
+## 9. 协作改动建议（避免踩坑）
 
 1. 改 `num_quantizers` 后，必须确认 LM token flatten/unflatten 路径一致。  
 2. 分部位量化层数不一致时，默认使用 `shared_Q=min(...)`；不要直接假设三部分层数相同。  
 3. 载入旧 ckpt 时若 key 不匹配，优先检查 `load_checkpoint.py` remap 是否生效。  
 4. 新增 loss 名称建议保持 `prefix_name`（例如 `recons_xxx`），避免日志拆分逻辑报错。  
 5. 大规模训练前先跑小样本 smoke（含 tokenize -> train -> test 一整条链路）。
+6. Resume 时不要同时设置 `TRAIN.RESUME` 和 `TRAIN.PRETRAINED`，两者互斥。
+7. 如需修改 resume 时允许覆盖的配置项，编辑 `mGPT/config.py` 中的 `_RESUME_SAFE_OVERRIDES`。
 
 ---
 
-## 9. 相关文档
+## 10. 相关文档
 
 - 架构细节：`docs/model_construction_changelog.md`
 - Loss 更新：`docs/loss_update_changelog.md`

@@ -11,18 +11,25 @@ def create_logger(cfg, phase='train'):
     # set up logger
     if not root_output_dir.exists():
         print('=> creating {}'.format(root_output_dir))
-        root_output_dir.mkdir()
+        root_output_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg_name = cfg.NAME
-    model = cfg.model.target.split('.')[-2]
-    cfg_name = os.path.basename(cfg_name).split('.')[0]
-
-    final_output_dir = root_output_dir / model / cfg_name
-    cfg.FOLDER_EXP = str(final_output_dir)
+    # On resume, FOLDER_EXP is already set by resume_config; reuse it.
+    is_resume = bool(cfg.TRAIN.get("RESUME", ""))
+    if is_resume and "FOLDER_EXP" in cfg and cfg.FOLDER_EXP:
+        final_output_dir = Path(cfg.FOLDER_EXP)
+    else:
+        cfg_name = cfg.NAME
+        model = cfg.model.target.split('.')[-2]
+        cfg_name = os.path.basename(cfg_name).split('.')[0]
+        final_output_dir = root_output_dir / model / cfg_name
+        cfg.FOLDER_EXP = str(final_output_dir)
 
     time_str = time.strftime('%Y-%m-%d-%H-%M-%S')
 
     new_dir(cfg, phase, time_str, final_output_dir)
+
+    # Re-read FOLDER_EXP: new_dir may update it on directory collision
+    final_output_dir = Path(cfg.FOLDER_EXP)
 
     head = '%(asctime)-15s %(message)s'
     logger = config_logger(final_output_dir, time_str, phase, head)
@@ -53,14 +60,26 @@ def config_logger(final_output_dir, time_str, phase, head):
 
 @rank_zero_only
 def new_dir(cfg, phase, time_str, final_output_dir):
-    # new experiment folder
     cfg.TIME = str(time_str)
-    if os.path.exists(final_output_dir) and not os.path.exists(cfg.TRAIN.RESUME) and not cfg.DEBUG and phase not in ['test', 'demo']:
-        file_list = sorted(os.listdir(final_output_dir), reverse=True)
-        for item in file_list:
-            if item.endswith('.log'):
-                os.rename(str(final_output_dir), str(final_output_dir) + '_' + cfg.TIME)
-                break
+    is_resume = bool(cfg.TRAIN.get("RESUME", ""))
+
+    if (
+        os.path.exists(final_output_dir)
+        and not is_resume
+        and not cfg.DEBUG
+        and phase not in ['test', 'demo']
+    ):
+        # Directory collision: give the NEW experiment a timestamp suffix
+        # so the old experiment directory stays untouched.
+        has_log = any(
+            item.endswith('.log')
+            for item in os.listdir(final_output_dir)
+        )
+        if has_log:
+            new_path = str(final_output_dir) + '_' + time_str
+            final_output_dir = Path(new_path)
+            cfg.FOLDER_EXP = str(final_output_dir)
+
     final_output_dir.mkdir(parents=True, exist_ok=True)
     # write config yaml
     config_file = '{}_{}_{}.yaml'.format('config', time_str, phase)

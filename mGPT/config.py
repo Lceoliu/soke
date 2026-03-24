@@ -5,6 +5,29 @@ from os.path import join as pjoin
 import os
 import glob
 
+# Keys that may be safely overridden when resuming from a checkpoint.
+# Everything else is restored from the original training config.
+_RESUME_SAFE_OVERRIDES = frozenset({
+    "USE_GPUS",
+    "DEVICE",
+    "NUM_NODES",
+    "PRECISION",
+    "ACCELERATOR",
+    "DEBUG",
+    "TRAIN.END_EPOCH",
+    "TRAIN.BATCH_SIZE",
+    "TRAIN.NUM_WORKERS",
+    "TRAIN.ACCUMULATE_GRAD_BATCHES",
+    "TRAIN.NUM_SANITY_VAL_STEPS",
+    "TRAIN.DDP_FIND_UNUSED_PARAMETERS",
+    "EVAL.BATCH_SIZE",
+    "EVAL.NUM_WORKERS",
+    "EVAL.DISABLE_VAL",
+    "TEST.BATCH_SIZE",
+    "TEST.NUM_WORKERS",
+    "LOGGER.VAL_EVERY_STEPS",
+})
+
 
 def get_module_config(cfg, filepath="./configs"):
     """
@@ -44,22 +67,83 @@ def instantiate_from_config(config):
 
 def resume_config(cfg: OmegaConf):
     """
-    Resume model and wandb
-    """
-    
-    if cfg.TRAIN.RESUME:
-        resume = cfg.TRAIN.RESUME
-        if os.path.exists(resume):
-            # Checkpoints
-            cfg.TRAIN.PRETRAINED = pjoin(resume, "checkpoints", "last.ckpt")
-            # Wandb
-            wandb_files = os.listdir(pjoin(resume, "wandb", "latest-run"))
-            wandb_run = [item for item in wandb_files if "run-" in item][0]
-            cfg.LOGGER.WANDB.params.id = wandb_run.replace("run-","").replace(".wandb", "")
-        else:
-            raise ValueError("Resume path is not right.")
+    On resume: load the original training config from the experiment directory
+    inferred from the checkpoint path, then apply only safe runtime overrides
+    from the current (CLI-supplied) config.
 
-    return cfg
+    Semantics:
+      TRAIN.RESUME    – checkpoint FILE path for full resume (weights + optimizer + epoch)
+      TRAIN.PRETRAINED – checkpoint FILE path for weight-only init
+      These two are mutually exclusive.
+    """
+    resume_path = str(cfg.TRAIN.get("RESUME", "") or "")
+    pretrained_path = str(cfg.TRAIN.get("PRETRAINED", "") or "")
+
+    if resume_path and pretrained_path:
+        raise ValueError(
+            "TRAIN.RESUME and TRAIN.PRETRAINED are mutually exclusive. "
+            f"Got RESUME={resume_path}, PRETRAINED={pretrained_path}"
+        )
+
+    if not resume_path:
+        return cfg
+
+    if not os.path.isfile(resume_path):
+        raise ValueError(
+            f"TRAIN.RESUME must point to a checkpoint file, got: {resume_path}"
+        )
+
+    # Infer experiment dir: .../checkpoints/last.ckpt → .../
+    exp_dir = os.path.dirname(os.path.dirname(os.path.abspath(resume_path)))
+
+    # Load original training config
+    config_yamls = sorted(glob.glob(pjoin(exp_dir, "config_*_train.yaml")))
+    if not config_yamls:
+        raise FileNotFoundError(
+            f"No config_*_train.yaml found in {exp_dir}. "
+            "Cannot resume without the original training config."
+        )
+    original_cfg = OmegaConf.load(config_yamls[-1])
+
+    # Apply safe runtime overrides from current config
+    for key in _RESUME_SAFE_OVERRIDES:
+        try:
+            val = OmegaConf.select(cfg, key)
+            if val is not None:
+                OmegaConf.update(original_cfg, key, val)
+        except Exception:
+            pass
+
+    # Keep LR scheduler horizon in sync with the (possibly overridden) END_EPOCH
+    try:
+        new_end_epoch = OmegaConf.select(original_cfg, "TRAIN.END_EPOCH")
+        if new_end_epoch is not None and OmegaConf.select(original_cfg, "TRAIN.LR_SCHEDULER.params.T_max") is not None:
+            OmegaConf.update(original_cfg, "TRAIN.LR_SCHEDULER.params.T_max", new_end_epoch)
+    except Exception:
+        pass
+
+    # Preserve dataset/path config from the current run (paths may differ across machines)
+    if "DATASET" in cfg:
+        original_cfg.DATASET = cfg.DATASET
+
+    # Force resume-specific fields
+    original_cfg.TRAIN.RESUME = resume_path
+    original_cfg.TRAIN.PRETRAINED = ""
+    OmegaConf.update(original_cfg, "FOLDER_EXP", exp_dir)
+
+    # Recover wandb run ID for seamless logging continuation
+    wandb_dir = pjoin(exp_dir, "wandb", "latest-run")
+    if os.path.isdir(wandb_dir):
+        try:
+            wandb_files = os.listdir(wandb_dir)
+            wandb_run = [f for f in wandb_files if "run-" in f][0]
+            original_cfg.LOGGER.WANDB.params.id = (
+                wandb_run.replace("run-", "").replace(".wandb", "")
+            )
+        except (IndexError, OSError):
+            pass
+
+    return original_cfg
 
 def parse_args(phase="train"):
     """

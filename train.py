@@ -92,9 +92,8 @@ def main():
     logger.info(f"DDP find_unused_parameters={find_unused if len(cfg.DEVICE) > 1 else 'auto'}")
     logger.info(f"Validation enabled={not bool(cfg.EVAL.get('DISABLE_VAL', False))}")
 
-    # Strict load pretrianed model
-    # 只在非RESUME模式下加载，RESUME时由trainer.fit自动加载
-    if cfg.TRAIN.PRETRAINED and not cfg.TRAIN.RESUME:
+    # Weight-only init (mutually exclusive with RESUME)
+    if cfg.TRAIN.PRETRAINED:
         load_pretrained(cfg, model, logger)
 
     # Strict load vae model (supports per-module checkpoint control)
@@ -106,17 +105,11 @@ def main():
     ):
         load_pretrained_vae(cfg, model, logger)
 
-    # Pytorch 2.0 Compile
-    # if torch.__version__ >= "2.0.0":
-    #     model = torch.compile(model, mode="reduce-overhead")
-    # model = torch.compile(model)
-
     # Lightning Fitting
     if cfg.TRAIN.RESUME:
-        trainer.fit(model,
-                    datamodule=datamodule,
-                    ckpt_path=cfg.TRAIN.PRETRAINED,
-                    weights_only=False)
+        # Full resume: restores weights, optimizer, lr_scheduler, epoch, etc.
+        logger.info(f"Resuming from checkpoint: {cfg.TRAIN.RESUME}")
+        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.TRAIN.RESUME)
     else:
         trainer.fit(model, datamodule=datamodule)
 

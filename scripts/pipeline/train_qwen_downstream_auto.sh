@@ -120,9 +120,8 @@ if "$EXP_NAME":
 if "$PRETRAINED_VAE":
     cfg.TRAIN.PRETRAINED_VAE = "$PRETRAINED_VAE"
 if "$RESUME_CKPT":
-    import os
-    cfg.TRAIN.PRETRAINED = "$RESUME_CKPT"
-    cfg.TRAIN.RESUME = os.path.dirname(os.path.dirname("$RESUME_CKPT"))
+    cfg.TRAIN.RESUME = "$RESUME_CKPT"
+    cfg.TRAIN.PRETRAINED = ""
 else:
     cfg.TRAIN.RESUME = ""
     cfg.TRAIN.PRETRAINED = ""
@@ -173,7 +172,11 @@ PY
   RUN_CFG="$TMP_CFG"
 fi
 
-EXP_DIR=$($PYTHON_BIN - <<PY
+if [[ -n "$RESUME_CKPT" && -f "$RESUME_CKPT" ]]; then
+  # On resume, infer EXP_DIR from checkpoint: .../checkpoints/last.ckpt -> .../
+  EXP_DIR=$(dirname "$(dirname "$(realpath "$RESUME_CKPT")")")
+else
+  EXP_DIR=$($PYTHON_BIN - <<PY
 from omegaconf import OmegaConf
 cfg = OmegaConf.load("$RUN_CFG")
 model = str(cfg.model.target).split('.')[-2].lower()
@@ -182,6 +185,7 @@ name = cfg.get("NAME", "SOKE")
 print(f"{folder}/{model}/{name}")
 PY
 )
+fi
 
 IFS=',' read -r -a GPUS <<< "$GPU_IDS"
 DEVICE_ARGS=()

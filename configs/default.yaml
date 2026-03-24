@@ -14,9 +14,9 @@ TRAIN:
     SAVE_ON_TRAIN_END: true
     ENABLE_ROLLING_LAST: true
 
-  RESUME: '' # Experiment path to be resumed training
+  RESUME: '' # Checkpoint FILE path for full resume (weights+optimizer+epoch). Mutually exclusive with PRETRAINED.
   PRETRAINED_VAE: '' # Pretrained vae/vqvae model path
-  PRETRAINED: '' # Pretrained model path
+  PRETRAINED: '' # Checkpoint FILE path for weight-only init. Mutually exclusive with RESUME.
 
   OPTIM:
     target: AdamW
