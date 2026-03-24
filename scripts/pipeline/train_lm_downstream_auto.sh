@@ -183,6 +183,18 @@ cur = {
     "motion_vae": str(cfg.model.params.motion_vae),
     "hand_vae_cfg": str(cfg.model.params.get("hand_vae_cfg", None)),
     "rhand_vae_cfg": str(cfg.model.params.get("rhand_vae_cfg", None)),
+    "body_num_quantizers": int(cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+    "hand_num_quantizers": int(cfg.model.params.get("hand_vae_cfg", {}).get("params", {}).get("num_quantizers", cfg.model.params.motion_vae.params.get("num_quantizers", 1)) if cfg.model.params.get("hand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+    "rhand_num_quantizers": int(cfg.model.params.get("rhand_vae_cfg", {}).get("params", {}).get("num_quantizers", cfg.model.params.motion_vae.params.get("num_quantizers", 1)) if cfg.model.params.get("rhand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+    "shared_num_quantizers": int(min([
+        int(cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+        int(cfg.model.params.get("hand_vae_cfg", {}).get("params", {}).get("num_quantizers", cfg.model.params.motion_vae.params.get("num_quantizers", 1)) if cfg.model.params.get("hand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+        int(cfg.model.params.get("rhand_vae_cfg", {}).get("params", {}).get("num_quantizers", cfg.model.params.motion_vae.params.get("num_quantizers", 1)) if cfg.model.params.get("rhand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("num_quantizers", 1)),
+    ])),
+    "body_codebook_size": int(cfg.model.params.motion_vae.params.get("code_num", 0)),
+    "hand_codebook_size": int(cfg.model.params.get("hand_vae_cfg", {}).get("params", {}).get("code_num", cfg.model.params.motion_vae.params.get("code_num", 0)) if cfg.model.params.get("hand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("code_num", 0)),
+    "rhand_codebook_size": int(cfg.model.params.get("rhand_vae_cfg", {}).get("params", {}).get("code_num", cfg.model.params.motion_vae.params.get("code_num", 0)) if cfg.model.params.get("rhand_vae_cfg", None) is not None else cfg.model.params.motion_vae.params.get("code_num", 0)),
+    "q_offset_mode": "per_q_offset_v1",
 }
 raise SystemExit(0 if old == cur else 1)
 PY

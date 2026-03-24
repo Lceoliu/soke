@@ -2,6 +2,7 @@ import pickle
 import numpy as np
 import os
 import math
+import json
 from bisect import bisect_left, bisect_right
 
 keys = ['smplx_root_pose', 
@@ -12,6 +13,16 @@ keys = ['smplx_root_pose',
         'smplx_shape', 
         'smplx_expr'
     ]
+
+
+def load_token_cache_meta(code_path):
+    if not code_path:
+        return {}
+    meta_path = os.path.join(code_path, "_tokenizer_meta.json")
+    if not os.path.exists(meta_path):
+        return {}
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _try_load_code(code_path, dataset_subdir, name):
@@ -190,4 +201,3 @@ def load_phoenix_sample(ann, data_dir, need_pose=True, code_path=None, need_code
 def sample(input,count):
     ss=float(len(input))/count
     return [ input[int(math.floor(i*ss))] for i in range(count) ]
-

@@ -33,9 +33,45 @@ def flatten_token_levels(token_tensor, q_keep=None):
     return token_tensor, 1
 
 
+def _extract_num_quantizers(module_cfg, default_q=1):
+    if module_cfg is None:
+        return int(default_q)
+    try:
+        params = module_cfg.get("params", None)
+    except Exception:
+        params = None
+    if params is None:
+        return int(default_q)
+    try:
+        return int(params.get("num_quantizers", default_q))
+    except Exception:
+        return int(default_q)
+
+
+def _extract_codebook_size(module_cfg, default_code_num=0):
+    if module_cfg is None:
+        return int(default_code_num)
+    try:
+        params = module_cfg.get("params", None)
+    except Exception:
+        params = None
+    if params is None:
+        return int(default_code_num)
+    try:
+        return int(params.get("code_num", default_code_num))
+    except Exception:
+        return int(default_code_num)
+
+
 def build_token_cache_meta(cfg):
     train_cfg = cfg.TRAIN
     model_params = cfg.model.params
+    body_q = _extract_num_quantizers(model_params.get("motion_vae", None), default_q=1)
+    body_code_num = _extract_codebook_size(model_params.get("motion_vae", None), default_code_num=0)
+    hand_q = _extract_num_quantizers(model_params.get("hand_vae_cfg", None), default_q=body_q)
+    rhand_q = _extract_num_quantizers(model_params.get("rhand_vae_cfg", None), default_q=body_q)
+    hand_code_num = _extract_codebook_size(model_params.get("hand_vae_cfg", None), default_code_num=body_code_num)
+    rhand_code_num = _extract_codebook_size(model_params.get("rhand_vae_cfg", None), default_code_num=body_code_num)
     return {
         "pretrained_vae": str(train_cfg.get("PRETRAINED_VAE", "") or ""),
         "pretrained_vae_body": str(train_cfg.get("PRETRAINED_VAE_BODY", "") or ""),
@@ -46,6 +82,14 @@ def build_token_cache_meta(cfg):
         "motion_vae": str(model_params.motion_vae),
         "hand_vae_cfg": str(model_params.get("hand_vae_cfg", None)),
         "rhand_vae_cfg": str(model_params.get("rhand_vae_cfg", None)),
+        "body_num_quantizers": int(body_q),
+        "hand_num_quantizers": int(hand_q),
+        "rhand_num_quantizers": int(rhand_q),
+        "shared_num_quantizers": int(min([body_q, hand_q, rhand_q])),
+        "body_codebook_size": int(body_code_num),
+        "hand_codebook_size": int(hand_code_num),
+        "rhand_codebook_size": int(rhand_code_num),
+        "q_offset_mode": "per_q_offset_v1",
     }
 
 
@@ -97,9 +141,24 @@ def main():
             q_lhand = target_lhand.shape[-1] if target_lhand.dim() == 3 else 1
             q_rhand = target_rhand.shape[-1] if target_rhand.dim() == 3 else 1
             q_shared = min(q_re, q_lhand, q_rhand)
-            target_re, _ = flatten_token_levels(target_re, q_keep=q_shared)
-            target_lhand, _ = flatten_token_levels(target_lhand, q_keep=q_shared)
-            target_rhand, _ = flatten_token_levels(target_rhand, q_keep=q_shared)
+            target_re, _ = model._flatten_single_tokens_for_lm(
+                target_re[0],
+                q_shared,
+                int(getattr(model, "body_codebook_size", getattr(model.vae, "code_num", 0))),
+            )
+            target_lhand, _ = model._flatten_single_tokens_for_lm(
+                target_lhand[0],
+                q_shared,
+                int(getattr(model, "hand_codebook_size", getattr(model.hand_vae, "code_num", 0))),
+            )
+            target_rhand, _ = model._flatten_single_tokens_for_lm(
+                target_rhand[0],
+                q_shared,
+                int(getattr(model, "rhand_codebook_size", getattr(model.rhand_vae, "code_num", 0))),
+            )
+            target_re = target_re.unsqueeze(0)
+            target_lhand = target_lhand.unsqueeze(0)
+            target_rhand = target_rhand.unsqueeze(0)
             min_len = min(target_re.shape[1], target_lhand.shape[1], target_rhand.shape[1])
             return np.stack(
                 [
@@ -118,13 +177,28 @@ def main():
                 q_re = target_re.shape[-1] if target_re.dim() == 3 else 1
                 q_hand = target_hand.shape[-1] if target_hand.dim() == 3 else 1
                 q_shared = min(q_re, q_hand)
-                target_re, _ = flatten_token_levels(target_re, q_keep=q_shared)
-                target_hand, _ = flatten_token_levels(target_hand, q_keep=q_shared)
+                target_re, _ = model._flatten_single_tokens_for_lm(
+                    target_re[0],
+                    q_shared,
+                    int(getattr(model, "body_codebook_size", getattr(model.vae, "code_num", 0))),
+                )
+                target_hand, _ = model._flatten_single_tokens_for_lm(
+                    target_hand[0],
+                    q_shared,
+                    int(getattr(model, "hand_codebook_size", getattr(model.hand_vae, "code_num", 0))),
+                )
+                target_re = target_re.unsqueeze(0)
+                target_hand = target_hand.unsqueeze(0)
                 min_len = min(target_re.shape[1], target_hand.shape[1])
                 return np.stack([target_re[:, :min_len].to('cpu').numpy(), target_hand[:, :min_len].to('cpu').numpy()], axis=-1)
             else:
                 target, _ = model.vae.encode(pose)
-                target, _ = flatten_token_levels(target)
+                target, _ = model._flatten_single_tokens_for_lm(
+                    target[0],
+                    int(getattr(model, "lm_body_num_quantizers", 1)),
+                    int(getattr(model, "body_codebook_size", getattr(model.vae, "code_num", 0))),
+                )
+                target = target.unsqueeze(0)
                 return target.to('cpu').numpy()
 
     skip_existing = os.environ.get("SKIP_EXISTING_TOKENS", "1") == "1"

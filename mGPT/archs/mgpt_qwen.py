@@ -56,6 +56,7 @@ class QwenCausalLM(nn.Module):
         mc_prefix_ratio: float = 0.5,
         torch_dtype: str = "bfloat16",
         sign_streams: Optional[Sequence[str]] = None,
+        num_quantizers: int = 1,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -70,6 +71,7 @@ class QwenCausalLM(nn.Module):
         self.m_codebook_size = int(motion_codebook_size)
         self.hand_codebook_size = int(hand_codebook_size)
         self.rhand_codebook_size = int(rhand_codebook_size)
+        self.num_quantizers = int(max(num_quantizers, 1))
         self.mc_prefix_ratio = float(mc_prefix_ratio)
         self.sign_streams = normalize_sign_streams(sign_streams)
         self.num_token_parts = int(len(self.sign_streams))
@@ -84,9 +86,10 @@ class QwenCausalLM(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         add_missing_special_tokens(self.tokenizer)
-        self.motion_tokens = [f"<motion_id_{i}>" for i in range(self.m_codebook_size + 3)]
-        self.hand_tokens = [f"<hand_id_{i}>" for i in range(self.hand_codebook_size + 3)]
-        self.rhand_tokens = [f"<rhand_id_{i}>" for i in range(self.rhand_codebook_size + 3)]
+        nq = self.num_quantizers
+        self.motion_tokens = [f"<motion_id_{i}>" for i in range(self.m_codebook_size * nq + 3)]
+        self.hand_tokens = [f"<hand_id_{i}>" for i in range(self.hand_codebook_size * nq + 3)]
+        self.rhand_tokens = [f"<rhand_id_{i}>" for i in range(self.rhand_codebook_size * nq + 3)]
         self.tokenizer.add_tokens(self.motion_tokens + self.hand_tokens + self.rhand_tokens)
 
         self.language_model = AutoModelForCausalLM.from_pretrained(

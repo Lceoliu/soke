@@ -102,6 +102,10 @@ class H2SDataModule(BASEDataModule):
             cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
         self.hparams.lm_token_num_quantizers = 1
         self.hparams.lm_token_num_parts = 1
+        self.hparams.lm_body_codebook_size = 0
+        self.hparams.lm_hand_codebook_size = 0
+        self.hparams.lm_rhand_codebook_size = 0
+        self.hparams.lm_q_offset_mode = "per_q_offset_v1"
 
         def _extract_num_quantizers(module_cfg, default_q=1):
             if module_cfg is None:
@@ -116,6 +120,20 @@ class H2SDataModule(BASEDataModule):
                 return int(params.get("num_quantizers", default_q))
             except Exception:
                 return int(default_q)
+
+        def _extract_codebook_size(module_cfg, default_code_num=0):
+            if module_cfg is None:
+                return int(default_code_num)
+            try:
+                params = module_cfg.get("params", None)
+            except Exception:
+                params = None
+            if params is None:
+                return int(default_code_num)
+            try:
+                return int(params.get("code_num", default_code_num))
+            except Exception:
+                return int(default_code_num)
 
         # Dataset switch
         self.DatasetEval = H2SMotionDatasetVQ if cfg.TRAIN.STAGE in ["vae"] else Text2MotionDatasetEval
@@ -137,14 +155,22 @@ class H2SDataModule(BASEDataModule):
             body_q = _extract_num_quantizers(model_params.get("motion_vae", None), default_q=1)
             q_list = [body_q]
             num_parts = 1
+            body_code_num = _extract_codebook_size(model_params.get("motion_vae", None), default_code_num=0)
+            hand_code_num = body_code_num
+            rhand_code_num = body_code_num
             if model_params.get("hand_vae_cfg", None) is not None:
                 q_list.append(_extract_num_quantizers(model_params.get("hand_vae_cfg"), default_q=body_q))
                 num_parts += 1
+                hand_code_num = _extract_codebook_size(model_params.get("hand_vae_cfg"), default_code_num=body_code_num)
             if model_params.get("rhand_vae_cfg", None) is not None:
                 q_list.append(_extract_num_quantizers(model_params.get("rhand_vae_cfg"), default_q=body_q))
                 num_parts += 1
+                rhand_code_num = _extract_codebook_size(model_params.get("rhand_vae_cfg"), default_code_num=body_code_num)
             self.hparams.lm_token_num_quantizers = int(min(q_list))
             self.hparams.lm_token_num_parts = int(num_parts)
+            self.hparams.lm_body_codebook_size = int(body_code_num)
+            self.hparams.lm_hand_codebook_size = int(hand_code_num)
+            self.hparams.lm_rhand_codebook_size = int(rhand_code_num)
             self.Dataset = Text2MotionDatasetCB
         elif cfg.TRAIN.STAGE == "token":
             self.Dataset = Text2MotionDatasetToken

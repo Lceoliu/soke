@@ -77,6 +77,18 @@ class MotionGPT(BaseModel):
         # We use the minimum quantizer level count to avoid invalid shape coupling when parts differ.
         self.lm_shared_num_quantizers = int(min(q_candidates))
 
+        # Store per-part codebook sizes for q-offset calculations
+        self.body_codebook_size = int(getattr(self.vae, "code_num", codebook_size))
+        self.hand_codebook_size = int(
+            getattr(getattr(self, "hand_vae", None), "code_num", self.body_codebook_size)
+        )
+        self.rhand_codebook_size = int(
+            getattr(getattr(self, "rhand_vae", None), "code_num", self.body_codebook_size)
+        )
+
+        # Pass num_quantizers so LM creates per-q vocabulary regions
+        lm['params']['num_quantizers'] = self.lm_shared_num_quantizers
+
         # Freeze the motion tokenizer for lm training
         if 'lm' in self.hparams.stage:
             self.vae.training = False
@@ -319,11 +331,18 @@ class MotionGPT(BaseModel):
         if not torch.is_tensor(tokens):
             return tokens, lengths
 
-        # [B, T, Q, 3] -> [B, T*Q, 3]
+        # [B, T, Q, P] -> [B, T*Q, P]  (P = num body parts)
         if tokens.dim() == 4:
             q_use = min(int(tokens.shape[2]), int(self.lm_shared_num_quantizers))
             if q_use > 0 and int(tokens.shape[2]) != q_use:
                 tokens = tokens[:, :, :q_use, :]
+            # Apply per-q offset per part: part 0=body, 1=lhand, 2=rhand
+            cb_sizes = [self.body_codebook_size, self.hand_codebook_size, self.rhand_codebook_size]
+            for p in range(tokens.shape[3]):
+                cb = cb_sizes[p] if p < len(cb_sizes) else cb_sizes[0]
+                if cb > 0 and q_use > 1:
+                    q_offsets = torch.arange(q_use, device=tokens.device, dtype=tokens.dtype) * cb
+                    tokens[:, :, :, p] = tokens[:, :, :, p] + q_offsets.unsqueeze(0).unsqueeze(0)
             bsz, tlen, _, pnum = tokens.shape
             tokens = tokens.reshape(bsz, tlen * q_use, pnum)
             lengths = [int(l) * q_use for l in lengths]
@@ -340,6 +359,9 @@ class MotionGPT(BaseModel):
             q_use = min(int(tokens.shape[-1]), int(self.lm_body_num_quantizers))
             if q_use > 0 and int(tokens.shape[-1]) != q_use:
                 tokens = tokens[:, :, :q_use]
+            if self.body_codebook_size > 0 and q_use > 1:
+                q_offsets = torch.arange(q_use, device=tokens.device, dtype=tokens.dtype) * self.body_codebook_size
+                tokens = tokens + q_offsets.unsqueeze(0).unsqueeze(0)  # [B, T, Q] + [1, 1, Q]
             bsz, tlen, _ = tokens.shape
             tokens = tokens.reshape(bsz, tlen * q_use)
             lengths = [int(l) * q_use for l in lengths]
@@ -348,32 +370,50 @@ class MotionGPT(BaseModel):
         return tokens, lengths
 
     @staticmethod
-    def _flatten_single_tokens_for_lm(tokens: torch.Tensor, q_use: int):
+    def _flatten_single_tokens_for_lm(tokens: torch.Tensor, q_use: int, codebook_size: int = 0):
+        """Flatten [T, Q] → [T*Q] with per-q vocabulary offset.
+
+        When codebook_size > 0, token at quantizer layer q is offset by
+        q * codebook_size so that each layer occupies a distinct region of
+        the vocabulary.  Set codebook_size=0 to disable (legacy behaviour).
+        """
         if tokens.dim() == 1:
             return tokens, int(tokens.shape[0])
         if tokens.dim() == 2:
             q_keep = min(int(tokens.shape[-1]), int(max(q_use, 1)))
-            tokens = tokens[:, :q_keep].reshape(-1)
+            tokens = tokens[:, :q_keep]
+            if codebook_size > 0 and q_keep > 1:
+                q_offsets = torch.arange(q_keep, device=tokens.device, dtype=tokens.dtype) * codebook_size
+                tokens = tokens + q_offsets.unsqueeze(0)  # [T, Q] + [1, Q]
+            tokens = tokens.reshape(-1)
             return tokens, int(tokens.shape[0])
         return tokens.reshape(-1), int(tokens.numel())
 
     @staticmethod
-    def _unflatten_single_tokens_from_lm(tokens: torch.Tensor, q_use: int):
+    def _unflatten_single_tokens_from_lm(tokens: torch.Tensor, q_use: int, codebook_size: int = 0):
+        """Unflatten [T*Q] → [T, Q] and remove per-q vocabulary offset."""
         if tokens.dim() != 1:
             tokens = tokens.reshape(-1)
         q_use = int(max(q_use, 1))
         if q_use == 1:
+            if codebook_size > 0:
+                tokens = tokens.clamp(min=0, max=codebook_size - 1)
             return tokens
         valid = (int(tokens.shape[0]) // q_use) * q_use
         if valid <= 0:
             return tokens[:1]
-        return tokens[:valid].view(-1, q_use)
+        tokens = tokens[:valid].view(-1, q_use)
+        if codebook_size > 0:
+            q_offsets = torch.arange(q_use, device=tokens.device, dtype=tokens.dtype) * codebook_size
+            tokens = tokens - q_offsets.unsqueeze(0)
+            tokens = tokens.clamp(min=0, max=codebook_size - 1)
+        return tokens
 
     def _encode_sign_tokens_from_motion(self, feats_ref: torch.Tensor):
         if self.hand_vae_cfg is None and self.rhand_vae_cfg is None:
             motion_token, _ = self.vae.encode(feats_ref)
             flat_motion, _ = self._flatten_single_tokens_for_lm(
-                motion_token[0], self.lm_body_num_quantizers
+                motion_token[0], self.lm_body_num_quantizers, self.body_codebook_size
             )
             return flat_motion
 
@@ -385,9 +425,9 @@ class MotionGPT(BaseModel):
             token_lhand, _ = self.hand_vae.encode(feats_ref_lhand)
             token_rhand, _ = self.rhand_vae.encode(feats_ref_rhand)
             q_use = int(self.lm_shared_num_quantizers)
-            flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use)
-            flat_lhand, _ = self._flatten_single_tokens_for_lm(token_lhand[0], q_use)
-            flat_rhand, _ = self._flatten_single_tokens_for_lm(token_rhand[0], q_use)
+            flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use, self.body_codebook_size)
+            flat_lhand, _ = self._flatten_single_tokens_for_lm(token_lhand[0], q_use, self.hand_codebook_size)
+            flat_rhand, _ = self._flatten_single_tokens_for_lm(token_rhand[0], q_use, self.rhand_codebook_size)
             min_len = min(flat_body.shape[0], flat_lhand.shape[0], flat_rhand.shape[0])
             return torch.stack(
                 [
@@ -403,8 +443,8 @@ class MotionGPT(BaseModel):
         token_body, _ = self.vae.encode(feats_ref_re)
         token_hand, _ = self.hand_vae.encode(feats_ref_hand)
         q_use = int(self.lm_shared_num_quantizers)
-        flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use)
-        flat_hand, _ = self._flatten_single_tokens_for_lm(token_hand[0], q_use)
+        flat_body, _ = self._flatten_single_tokens_for_lm(token_body[0], q_use, self.body_codebook_size)
+        flat_hand, _ = self._flatten_single_tokens_for_lm(token_hand[0], q_use, self.hand_codebook_size)
         min_len = min(flat_body.shape[0], flat_hand.shape[0])
         return torch.stack([flat_body[:min_len], flat_hand[:min_len]], dim=-1)
 
@@ -460,14 +500,14 @@ class MotionGPT(BaseModel):
         if outputs_tokens_hand is not None or outputs_tokens_rhand is not None:
             q_body_use = q_hand_use = q_rhand_use = self.lm_shared_num_quantizers
 
-        outputs_tokens = [self._unflatten_single_tokens_from_lm(tok, q_body_use) for tok in outputs_tokens]
+        outputs_tokens = [self._unflatten_single_tokens_from_lm(tok, q_body_use, self.body_codebook_size) for tok in outputs_tokens]
         if outputs_tokens_hand is not None:
             outputs_tokens_hand = [
-                self._unflatten_single_tokens_from_lm(tok, q_hand_use) for tok in outputs_tokens_hand
+                self._unflatten_single_tokens_from_lm(tok, q_hand_use, self.hand_codebook_size) for tok in outputs_tokens_hand
             ]
         if outputs_tokens_rhand is not None:
             outputs_tokens_rhand = [
-                self._unflatten_single_tokens_from_lm(tok, q_rhand_use) for tok in outputs_tokens_rhand
+                self._unflatten_single_tokens_from_lm(tok, q_rhand_use, self.rhand_codebook_size) for tok in outputs_tokens_rhand
             ]
 
         max_len = max(map(len, outputs_tokens)) if len(outputs_tokens) > 0 else 1
@@ -707,7 +747,7 @@ class MotionGPT(BaseModel):
         for i in range(len(feats_ref)):
             motion_token, _ = self.vae.encode(feats_ref[i:i + 1])
             flat_motion, len_motion = self._flatten_single_tokens_for_lm(
-                motion_token[0], self.lm_body_num_quantizers
+                motion_token[0], self.lm_body_num_quantizers, self.body_codebook_size
             )
             motion_tokens.append(flat_motion)
             lengths_tokens.append(len_motion)
@@ -723,12 +763,8 @@ class MotionGPT(BaseModel):
         min_len = lengths.copy()
 
         for i in range(len(lengths)):
-            outputs[i] = torch.clamp(outputs[i],
-                                     0,
-                                     self.hparams.codebook_size - 1,
-                                     out=None)
             outputs[i] = self._unflatten_single_tokens_from_lm(
-                outputs[i], self.lm_body_num_quantizers
+                outputs[i], self.lm_body_num_quantizers, self.body_codebook_size
             )
 
             if len(outputs[i]) > 1:

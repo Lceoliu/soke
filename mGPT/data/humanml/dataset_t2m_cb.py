@@ -13,7 +13,7 @@ import torch
 import pandas as pd
 from tqdm import tqdm
 from copy import deepcopy
-from .load_data import load_h2s_sample, load_csl_sample, load_phoenix_sample
+from .load_data import load_h2s_sample, load_csl_sample, load_phoenix_sample, load_token_cache_meta
 
 # Some how2sign ids are broken, failing in pose fitting.
 bad_how2sign_ids = ['0DU7wWLK-QU_0-8-rgb_front', '0ICZi26jdaQ_28-5-rgb_front', '0vNfEYst_tQ_11-8-rgb_front', '13X0vEMNm7M_8-5-rgb_front', '14weIYQswlE_23-8-rgb_front', '1B56XMJ-j1Q_13-8-rgb_front', '1P0oKY4FNyI_0-8-rgb_front', '1dpRaxOTfZs_0-8-rgb_front', '1ei1kVTw23A_29-8-rgb_front', '1spCnuBmWYk_0-8-rgb_front', '2-vXO7MMLJc_0-5-rgb_front', '21PbS6wnHtY_0-5-rgb_front', '3tyfxL2wO-M_0-8-rgb_front', 'BpYDl3AO4B8_0-1-rgb_front', 'CH7AviIr0-0_14-8-rgb_front', 'CJ8RyW9pzKU_6-8-rgb_front', 'D0T7ho08Q3o_25-2-rgb_front', 'Db5SUQvNsHc_18-1-rgb_front', 'Eh697LCFjTw_0-3-rgb_front', 'F-p1IdedNbg_23-8-rgb_front', 'aUBQCNegrYc_13-1-rgb_front', 'cvn7htBA8Xc_9-8-rgb_front', 'czBrBQgZIuc_19-5-rgb_front', 'dbSAB8F8GYc_11-9-rgb_front', 'doMosV-zfCI_7-2-rgb_front', 'dvBdWGLzayI_10-8-rgb_front', 'eBrlZcccILg_26-3-rgb_front', '39FN42e41r0_17-1-rgb_front', 'a4Nxq0QV_WA_9-3-rgb_front', 'fzrJBu2qsM8_11-8-rgb_front', 'g3Cc_1-V31U_12-3-rgb_front']
@@ -60,6 +60,15 @@ class Text2MotionDatasetCB(data.Dataset):
         self.code_path = code_path
         self.lm_token_num_quantizers = int(kwargs.get("lm_token_num_quantizers", 1))
         self.lm_token_num_parts = int(kwargs.get("lm_token_num_parts", 1))
+        self.lm_body_codebook_size = int(kwargs.get("lm_body_codebook_size", 0))
+        self.lm_hand_codebook_size = int(kwargs.get("lm_hand_codebook_size", self.lm_body_codebook_size))
+        self.lm_rhand_codebook_size = int(kwargs.get("lm_rhand_codebook_size", self.lm_body_codebook_size))
+        self.expected_q_offset_mode = str(kwargs.get("lm_q_offset_mode", "per_q_offset_v1"))
+        self.cache_q_offset_mode = "legacy"
+        if self.code_path:
+            code_root = os.path.join(self.data_root, self.code_path)
+            meta = load_token_cache_meta(code_root)
+            self.cache_q_offset_mode = str(meta.get("q_offset_mode", "legacy"))
         self.dynamic_task_sampling = bool(kwargs.get("dynamic_task_sampling", False))
         self.fixed_task = kwargs.get("fixed_task", None)
         self.train_task_classes = list(kwargs.get("train_task_classes", []))
@@ -178,8 +187,92 @@ class Text2MotionDatasetCB(data.Dataset):
             return {"class": task_name}
         return None
 
-    def _flatten_motion_tokens(self, m_tokens):
+    def _apply_q_offsets_np(self, m_tokens):
         tokens = np.asarray(m_tokens)
+        q_hint = max(int(self.lm_token_num_quantizers), 1)
+        if self.cache_q_offset_mode == self.expected_q_offset_mode:
+            return tokens
+        if q_hint > 1:
+            if tokens.ndim == 3:
+                cb_sizes = [
+                    int(self.lm_body_codebook_size),
+                    int(self.lm_hand_codebook_size),
+                    int(self.lm_rhand_codebook_size),
+                ]
+                for p in range(min(tokens.shape[2], len(cb_sizes))):
+                    cb = cb_sizes[p]
+                    if cb > 0 and int(np.max(tokens[:, :, p])) >= cb:
+                        return tokens
+            elif tokens.ndim == 2 and self.lm_token_num_parts > 1 and int(tokens.shape[1]) == int(self.lm_token_num_parts):
+                cb_sizes = [
+                    int(self.lm_body_codebook_size),
+                    int(self.lm_hand_codebook_size),
+                    int(self.lm_rhand_codebook_size),
+                ]
+                for p in range(min(tokens.shape[1], len(cb_sizes))):
+                    cb = cb_sizes[p]
+                    if cb > 0 and int(np.max(tokens[:, p])) >= cb:
+                        return tokens
+            elif self.lm_body_codebook_size > 0 and int(np.max(tokens)) >= int(self.lm_body_codebook_size):
+                return tokens
+
+        if tokens.ndim == 3:
+            q_use = min(int(tokens.shape[1]), q_hint)
+            tokens = np.array(tokens[:, :q_use, :], copy=True)
+            cb_sizes = [
+                int(self.lm_body_codebook_size),
+                int(self.lm_hand_codebook_size),
+                int(self.lm_rhand_codebook_size),
+            ]
+            for p in range(tokens.shape[2]):
+                cb = cb_sizes[p] if p < len(cb_sizes) else cb_sizes[0]
+                if cb > 0 and q_use > 1:
+                    tokens[:, :, p] += (np.arange(q_use, dtype=tokens.dtype) * cb)[None, :]
+            return tokens
+
+        if tokens.ndim == 2 and self.lm_token_num_parts > 1 and int(tokens.shape[1]) == int(self.lm_token_num_parts):
+            if q_hint <= 1:
+                return tokens
+            valid = (int(tokens.shape[0]) // q_hint) * q_hint
+            if valid <= 0:
+                return tokens
+            tokens_valid = np.array(tokens[:valid], copy=True).reshape(-1, q_hint, tokens.shape[1])
+            cb_sizes = [
+                int(self.lm_body_codebook_size),
+                int(self.lm_hand_codebook_size),
+                int(self.lm_rhand_codebook_size),
+            ]
+            for p in range(tokens_valid.shape[2]):
+                cb = cb_sizes[p] if p < len(cb_sizes) else cb_sizes[0]
+                if cb > 0:
+                    tokens_valid[:, :, p] += (np.arange(q_hint, dtype=tokens_valid.dtype) * cb)[None, :]
+            tokens_valid = tokens_valid.reshape(valid, tokens.shape[1])
+            if valid == tokens.shape[0]:
+                return tokens_valid
+            return np.concatenate([tokens_valid, tokens[valid:]], axis=0)
+
+        if tokens.ndim == 2:
+            q_use = min(int(tokens.shape[1]), q_hint)
+            tokens = np.array(tokens[:, :q_use], copy=True)
+            if self.lm_body_codebook_size > 0 and q_use > 1:
+                tokens += (np.arange(q_use, dtype=tokens.dtype) * self.lm_body_codebook_size)[None, :]
+            return tokens
+
+        if tokens.ndim == 1 and q_hint > 1 and self.lm_body_codebook_size > 0:
+            valid = (int(tokens.shape[0]) // q_hint) * q_hint
+            if valid <= 0:
+                return tokens
+            tokens_valid = np.array(tokens[:valid], copy=True).reshape(-1, q_hint)
+            tokens_valid += (np.arange(q_hint, dtype=tokens_valid.dtype) * self.lm_body_codebook_size)[None, :]
+            tokens_valid = tokens_valid.reshape(valid)
+            if valid == tokens.shape[0]:
+                return tokens_valid
+            return np.concatenate([tokens_valid, tokens[valid:]], axis=0)
+
+        return tokens
+
+    def _flatten_motion_tokens(self, m_tokens):
+        tokens = self._apply_q_offsets_np(m_tokens)
         if tokens.ndim == 3:
             # [T, Q, P] -> [T*Q, P]
             t, q, p = tokens.shape
