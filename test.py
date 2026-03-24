@@ -9,7 +9,6 @@ from rich.table import Table
 import torch
 from omegaconf import OmegaConf
 from mGPT.callback import build_callbacks
-import mGPT.utils.compat  # noqa: F401  PyTorch 2.6 weights_only patch
 from mGPT.config import parse_args
 from mGPT.data.build_data import build_data
 from mGPT.models.build_model import build_model

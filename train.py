@@ -5,7 +5,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.strategies import DDPStrategy
 from omegaconf import OmegaConf
 from mGPT.callback import build_callbacks
-import mGPT.utils.compat  # noqa: F401  PyTorch 2.6 weights_only patch
 from mGPT.config import parse_args, instantiate_from_config
 from mGPT.data.build_data import build_data
 from mGPT.models.build_model import build_model
@@ -110,7 +109,7 @@ def main():
     if cfg.TRAIN.RESUME:
         # Full resume: restores weights, optimizer, lr_scheduler, epoch, etc.
         logger.info(f"Resuming from checkpoint: {cfg.TRAIN.RESUME}")
-        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.TRAIN.RESUME)
+        trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.TRAIN.RESUME, weights_only=False)
     else:
         trainer.fit(model, datamodule=datamodule)
 
