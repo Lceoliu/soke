@@ -310,7 +310,8 @@ def parse_args(phase="train"):
         cfg.LOGGER.WANDB.params.offline = True
         cfg.LOGGER.VAL_EVERY_STEPS = 1
         
-    # Resume config
-    cfg = resume_config(cfg)
+    # Resume config (only applies during training)
+    if phase == "train":
+        cfg = resume_config(cfg)
 
     return cfg

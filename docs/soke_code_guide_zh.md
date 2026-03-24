@@ -118,6 +118,11 @@ LM 读取时支持多层 token（展平前可为 `[T, Q, P]` 或等价结构）�
    - Resume 时 LR scheduler `T_max` 自动与 `END_EPOCH` 同步。
    - Resume 时保留当前 `DATASET` 块，支持跨机器/挂载点恢复训练。
    - 新实验不再误用旧 config 中遗留的 `FOLDER_EXP`。
+   - Resume 写入的 config 快照使用 `resumed_*` 前缀，不干扰后续 resume 的 config 查找。
+   - `resume_config()` 仅在 train 阶段触发，test/eval 不受影响。
+   - PyTorch 2.6+ `weights_only` 兼容：注册 OmegaConf 类型为安全全局类。
+10. **Eval-only 自动 config 发现**（`scripts/pipeline/train_qwen_downstream_auto.sh`）：
+    - `TRAIN_LM=0` + `EVAL_CKPT` 时自动从实验目录发现训练 config，无需手动指定。
 
 ---
 
@@ -210,13 +215,25 @@ bash scripts/pipeline/train_lm_downstream_auto.sh
 
 脚本内部会将 `RESUME_CKPT` 设为 `cfg.TRAIN.RESUME`，并清空 `cfg.TRAIN.PRETRAINED`。
 
-### 6.4 注意事项
+### 6.4 Config 快照命名
+
+实验目录中保存的 config yaml 使用不同的命名前缀区分来源：
+
+| 文件名模式 | 来源 |
+|------------|------|
+| `config_<timestamp>_train.yaml` | 首次训练时写入的原始 config |
+| `resumed_<timestamp>_train.yaml` | 每次 resume 时写入的运行快照 |
+
+`resume_config()` 只匹配 `config_*_train.yaml`，因此无论 resume 多少次，都始终基于原始训练 config 恢复，不会被中间 resume 快照污染。`resumed_*` 文件仅用于回溯每次 resume 的实际运行参数。
+
+### 6.5 注意事项
 
 - `TRAIN.RESUME` 必须指向 **checkpoint 文件**（如 `last.ckpt`），不是实验目录。
 - Resume 时不需要手动指定 `EXP_NAME`——实验目录从 checkpoint 路径自动推断。
 - 如果需要修改 `END_EPOCH`，LR scheduler 的 `T_max` 会自动同步，无需手动设置。
 - 如果需要跨机器 resume，只需确保当前 config 中的数据集路径（`DATASET.H2S.ROOT` 等）正确即可。
 - 新实验（非 resume）即使使用了包含 `FOLDER_EXP` 的旧 config yaml 作为基础，也会正确生成新的实验目录。
+- `resume_config()` 仅在 `phase="train"` 时触发，test/demo/render 阶段不会被影响。
 
 ---
 
@@ -255,6 +272,17 @@ EVAL_CKPT=experiments/mgpt/SOKE_LFQ4_ACC_LM/checkpoints/last.ckpt \
 AUTO_EVAL_BLEU=1 AUTO_VIS=1 \
 bash scripts/pipeline/train_lm_downstream_auto.sh
 ```
+
+Qwen 下游脚本同理（只需指定 checkpoint，训练 config 自动从实验目录发现）：
+
+```bash
+TRAIN_LM=0 \
+EVAL_CKPT=experiments/mgpt/SOKE_QWEN_FULL_RETRAIN_0323/checkpoints/last.ckpt \
+AUTO_EVAL_BLEU=1 AUTO_SHOW_M2T=1 AUTO_VIS=1 \
+bash scripts/pipeline/train_qwen_downstream_auto.sh
+```
+
+> **自动 config 发现**：当 `TRAIN_LM=0` 且 `EVAL_CKPT` 非空时，Qwen 脚本会自动从 checkpoint 所在实验目录查找 `config_*_train.yaml` 作为运行 config，无需手动指定 `CFG`。如果用户显式设置了 `CFG=xxx.yaml`，则以用户指定的为准。
 
 ### 7.2 关键输出目录
 

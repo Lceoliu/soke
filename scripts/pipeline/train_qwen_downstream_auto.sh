@@ -97,7 +97,20 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:T
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
+# --- Resolve RUN_CFG ---
+# When only running eval/vis (TRAIN_LM=0) with EVAL_CKPT, auto-discover
+# the training config from the experiment directory so the user doesn't
+# have to specify it manually.
 RUN_CFG="$CFG"
+if [[ "$TRAIN_LM" != "1" && -n "$EVAL_CKPT" && -f "$EVAL_CKPT" && "$CFG" == "configs/soke.yaml" ]]; then
+  _CKPT_EXP_DIR=$(dirname "$(dirname "$(realpath "$EVAL_CKPT")")")
+  _DISCOVERED_CFG=$(ls -1t "$_CKPT_EXP_DIR"/config_*_train.yaml 2>/dev/null | head -n 1 || true)
+  if [[ -n "$_DISCOVERED_CFG" && -f "$_DISCOVERED_CFG" ]]; then
+    echo "[info] auto-discovered training config: $_DISCOVERED_CFG"
+    RUN_CFG="$_DISCOVERED_CFG"
+  fi
+fi
+
 if [[ -n "$BATCH_SIZE" || -n "$END_EPOCH" || -n "$EXP_NAME" || -n "$PRETRAINED_VAE" || -n "$RESUME_CKPT" || -n "$NUM_WORKERS" || -n "$ACCUMULATE_GRAD_BATCHES" || -n "$PRECISION" || -n "$QWEN_MODEL_PATH" || -n "$USE_LORA" || -n "$LORA_RANK" || -n "$LORA_ALPHA" || -n "$LORA_DROPOUT" || -n "$GRADIENT_CHECKPOINTING" || -n "$GEN_MAX_NEW_TOKENS" || -n "$MAX_LENGTH" || -n "$TORCH_DTYPE" || -n "$SIGN_STREAMS" || -n "$DATASET_NAME" || -n "$H2S_ROOT" || -n "$CSL_ROOT" || -n "$PHOENIX_ROOT" || -n "$MEAN_PATH" || -n "$STD_PATH" || -n "$CODE_PATH" ]]; then
   TMP_CFG="/tmp/soke_qwen_train_${TS}.yaml"
   "$PYTHON_BIN" - <<PY
@@ -175,6 +188,9 @@ fi
 if [[ -n "$RESUME_CKPT" && -f "$RESUME_CKPT" ]]; then
   # On resume, infer EXP_DIR from checkpoint: .../checkpoints/last.ckpt -> .../
   EXP_DIR=$(dirname "$(dirname "$(realpath "$RESUME_CKPT")")")
+elif [[ -n "$EVAL_CKPT" && -f "$EVAL_CKPT" ]]; then
+  # Eval-only mode: infer EXP_DIR from EVAL_CKPT
+  EXP_DIR=$(dirname "$(dirname "$(realpath "$EVAL_CKPT")")")
 else
   EXP_DIR=$($PYTHON_BIN - <<PY
 from omegaconf import OmegaConf

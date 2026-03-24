@@ -82,6 +82,9 @@ def new_dir(cfg, phase, time_str, final_output_dir):
 
     final_output_dir.mkdir(parents=True, exist_ok=True)
     # write config yaml
-    config_file = '{}_{}_{}.yaml'.format('config', time_str, phase)
+    # Use a distinct prefix for resume runs so that resume_config() always
+    # picks the original training config via "config_*_train.yaml".
+    prefix = "resumed" if is_resume else "config"
+    config_file = '{}_{}_{}.yaml'.format(prefix, time_str, phase)
     final_config_file = final_output_dir / config_file
     OmegaConf.save(config=cfg, f=final_config_file)
