@@ -120,8 +120,9 @@ if "$EXP_NAME":
 if "$PRETRAINED_VAE":
     cfg.TRAIN.PRETRAINED_VAE = "$PRETRAINED_VAE"
 if "$RESUME_CKPT":
+    import os
     cfg.TRAIN.PRETRAINED = "$RESUME_CKPT"
-    cfg.TRAIN.RESUME = ""
+    cfg.TRAIN.RESUME = os.path.dirname(os.path.dirname("$RESUME_CKPT"))
 else:
     cfg.TRAIN.RESUME = ""
     cfg.TRAIN.PRETRAINED = ""
