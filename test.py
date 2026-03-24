@@ -7,10 +7,9 @@ from pathlib import Path
 from rich import get_console
 from rich.table import Table
 import torch
-from omegaconf import OmegaConf, ListConfig, DictConfig
+from omegaconf import OmegaConf
 from mGPT.callback import build_callbacks
-
-torch.serialization.add_safe_globals([ListConfig, DictConfig])
+import mGPT.utils.compat  # noqa: F401  PyTorch 2.6 weights_only patch
 from mGPT.config import parse_args
 from mGPT.data.build_data import build_data
 from mGPT.models.build_model import build_model

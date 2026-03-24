@@ -3,12 +3,9 @@ import glob
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.strategies import DDPStrategy
-from omegaconf import OmegaConf, ListConfig, DictConfig
+from omegaconf import OmegaConf
 from mGPT.callback import build_callbacks
-
-# PyTorch 2.6+ defaults to weights_only=True in torch.load, but Lightning
-# checkpoints contain OmegaConf objects. Register them as safe globals.
-torch.serialization.add_safe_globals([ListConfig, DictConfig])
+import mGPT.utils.compat  # noqa: F401  PyTorch 2.6 weights_only patch
 from mGPT.config import parse_args, instantiate_from_config
 from mGPT.data.build_data import build_data
 from mGPT.models.build_model import build_model
