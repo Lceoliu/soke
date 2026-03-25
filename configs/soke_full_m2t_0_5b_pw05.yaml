@@ -1,0 +1,122 @@
+NAME: SOKE_QWEN05B_FULL_M2T_PW05
+USE_RAW_VIDEO: false
+PRECISION: bf16-mixed
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0,1,2,3,4,5,6,7]
+
+TRAIN:
+  STAGE: lm_pretrain
+  NUM_WORKERS: 16
+  BATCH_SIZE: 4
+  END_EPOCH: 160
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: 'experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt'
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+    PARAM_GROUPS:
+      ENABLE_DIFF_LR: true
+      BACKBONE_LR_MULT: 1.0
+      EMBED_LR_MULT: 10.0
+      LM_HEAD_LR_MULT: 10.0
+      FAST_WARMUP:
+        ENABLED: false
+        START_FACTOR: 0.2
+        BASE_WARMUP_EPOCHS: 0
+        EMBED_LM_HEAD_WARMUP_EPOCHS: 2
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: ${TRAIN.END_EPOCH}
+      eta_min: 1e-6
+
+EVAL:
+  BATCH_SIZE: 8
+  SPLIT: val
+  VAL_SUBSET_RATIO: 0.2
+  LM_VAL_TASKS: ['m2t']
+
+TEST:
+  CHECKPOINTS: null
+  SPLIT: test
+  BATCH_SIZE: 8
+  REPLICATION_TIMES: 1
+  SAVE_PREDICTIONS: true
+
+DATASET:
+  target: mGPT.data.H2S.H2SDataModule
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix
+    ROOT: data/How2Sign
+    CSL_ROOT: data/CSL-Daily
+    PHOENIX_ROOT: data/Phoenix_2014T
+    MEAN_PATH: data/CSL-Daily/mean.pt
+    STD_PATH: data/CSL-Daily/std.pt
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 40
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+    STD_TEXT: false
+    DYNAMIC_TASK_SAMPLING: true
+    TRAIN_TASKS: ['m2t']
+    TASK_SAMPLING:
+      m2t: 1.0
+  CODE_PATH: TOKENS_h2s_csl_phoenix
+
+METRIC:
+  TYPE: ['M2TMetrics']
+
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.0
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 'm2t'
+    lm:
+      target: mGPT.archs.mgpt_qwen.QwenCausalLM
+      params:
+        model_type: qwen2_causal
+        model_path: ./deps/Qwen2.5-0.5B
+        stage: ${TRAIN.STAGE}
+        motion_codebook_size: ${model.params.motion_vae.params.code_num}
+        hand_codebook_size: ${model.params.hand_vae_cfg.params.code_num}
+        rhand_codebook_size: ${model.params.rhand_vae_cfg.params.code_num}
+        max_length: 2048
+        generation_max_new_tokens: 1024
+        trust_remote_code: true
+        use_lora: true
+        lora_rank: 64
+        lora_alpha: 128
+        lora_dropout: 0.05
+        gradient_checkpointing: false
+        mc_prefix_ratio: 0.5
+        torch_dtype: bfloat16
+        sign_streams: [body, lhand, rhand]
+        m2t_prefix_loss_weight: 0.5
+    motion_vae: ${vq.re128_lfq4}
+    hand_vae_cfg: ${vq.hand256_lfq5}
+    rhand_vae_cfg: ${vq.hand256_lfq5}
+
+LOGGER:
+  TYPE: ['wandb']
+  VAL_EVERY_STEPS: 15
+  WANDB:
+    params:
+      project: SLG
+      offline: true

@@ -15,3 +15,4 @@ params:
   lora_dropout: 0.05
   gradient_checkpointing: true
   torch_dtype: bfloat16
+  m2t_prefix_loss_weight: 0.0

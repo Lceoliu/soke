@@ -57,6 +57,7 @@ class QwenCausalLM(nn.Module):
         torch_dtype: str = "bfloat16",
         sign_streams: Optional[Sequence[str]] = None,
         num_quantizers: int = 1,
+        m2t_prefix_loss_weight: float = 0.0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -73,6 +74,7 @@ class QwenCausalLM(nn.Module):
         self.rhand_codebook_size = int(rhand_codebook_size)
         self.num_quantizers = int(max(num_quantizers, 1))
         self.mc_prefix_ratio = float(mc_prefix_ratio)
+        self.m2t_prefix_loss_weight = float(m2t_prefix_loss_weight)
         self.sign_streams = normalize_sign_streams(sign_streams)
         self.num_token_parts = int(len(self.sign_streams))
         self.model_dtype = self._resolve_torch_dtype(torch_dtype)
@@ -345,17 +347,58 @@ class QwenCausalLM(nn.Module):
             sign_token_ids=sign_token_ids,
             mc_prefix_ratio=self.mc_prefix_ratio,
             mc_group_size=self.num_token_parts,
+            m2t_prefix_loss_weight=self.m2t_prefix_loss_weight,
         )
 
         input_ids = batch.input_ids.to(self.device)
         attention_mask = batch.attention_mask.to(self.device)
         labels = batch.labels.to(self.device)
-        return self.language_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True,
-        )
+
+        if batch.loss_weights is not None:
+            # Weighted loss: compute manually instead of using HF built-in
+            outputs = self.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            logits = outputs.logits
+            loss_weights = batch.loss_weights.to(self.device)
+            outputs.loss = self._weighted_causal_lm_loss(logits, labels, loss_weights)
+            return outputs
+        else:
+            return self.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                return_dict=True,
+            )
+
+    @staticmethod
+    def _weighted_causal_lm_loss(
+        logits: Tensor, labels: Tensor, loss_weights: Tensor,
+    ) -> Tensor:
+        # Standard causal LM shift
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        shift_weights = loss_weights[..., 1:].contiguous()
+
+        B, T, V = shift_logits.shape
+        per_token_loss = torch.nn.functional.cross_entropy(
+            shift_logits.view(-1, V),
+            shift_labels.view(-1),
+            reduction="none",
+            ignore_index=-100,
+        ).view(B, T)
+
+        # Mask weights at ignored positions (labels == -100)
+        valid_mask = (shift_labels != -100).float()
+        shift_weights = shift_weights * valid_mask
+
+        weighted_loss = (per_token_loss * shift_weights).sum()
+        weight_sum = shift_weights.sum()
+        if weight_sum == 0:
+            return weighted_loss * 0.0
+        return weighted_loss / weight_sum
 
     def _make_t2m_prompt(self, text: str) -> torch.Tensor:
         seq = [

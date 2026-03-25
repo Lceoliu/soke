@@ -28,6 +28,7 @@ class CausalTaskBatch:
     attention_mask: torch.Tensor
     raw_sequences: List[str]
     task_names: List[str]
+    loss_weights: Optional[torch.Tensor] = None
 
 
 def add_missing_special_tokens(tokenizer) -> List[str]:
@@ -140,6 +141,7 @@ class SignLanguageTaskFormatter:
         labels: List[List[int]],
         raw_sequences: List[str],
         task_names: List[str],
+        weights: Optional[List[Optional[List[float]]]] = None,
     ) -> CausalTaskBatch:
         if len(sequences) == 0:
             raise ValueError("Empty batch is not supported.")
@@ -153,11 +155,18 @@ class SignLanguageTaskFormatter:
         lab = torch.full((len(sequences), max_len), -100, dtype=torch.long)
         attn = torch.zeros((len(sequences), max_len), dtype=torch.long)
 
+        has_weights = weights is not None and any(w is not None for w in weights)
+        wt = None
+        if has_weights:
+            wt = torch.ones((len(sequences), max_len), dtype=torch.float32)
+
         for i, (seq, cur_lab) in enumerate(zip(sequences, labels)):
             seq_len = len(seq)
             batch[i, :seq_len] = torch.tensor(seq, dtype=torch.long)
             lab[i, :seq_len] = torch.tensor(cur_lab, dtype=torch.long)
             attn[i, :seq_len] = 1
+            if has_weights and weights[i] is not None:
+                wt[i, :seq_len] = torch.tensor(weights[i], dtype=torch.float32)
 
         return CausalTaskBatch(
             input_ids=batch,
@@ -165,6 +174,7 @@ class SignLanguageTaskFormatter:
             attention_mask=attn,
             raw_sequences=raw_sequences,
             task_names=task_names,
+            loss_weights=wt,
         )
 
     def _build_t2m_sample(self, text: str, sign_token_ids: Sequence[int]):
@@ -180,9 +190,11 @@ class SignLanguageTaskFormatter:
         loss_start = len(seq) - len(sign_token_ids) - 1
         labels = [-100] * loss_start + list(sign_token_ids) + [self._token_id("</sign>")]
         raw = f"<t2m> <text> {text} </text> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(sign_token_ids))} </sign>"
-        return seq, labels, raw
+        return seq, labels, None, raw
 
-    def _build_m2t_sample(self, text: str, sign_token_ids: Sequence[int]):
+    def _build_m2t_sample(
+        self, text: str, sign_token_ids: Sequence[int], prefix_loss_weight: float = 0.0,
+    ):
         text_ids = self._tokenize_text(text)
         seq = [
             self._token_id("<m2t>"),
@@ -193,10 +205,18 @@ class SignLanguageTaskFormatter:
             *text_ids,
             self._token_id("</text>"),
         ]
-        prefix_len = len(seq) - len(text_ids) - 1
-        labels = [-100] * prefix_len + text_ids + [self._token_id("</text>")]
         raw = f"<m2t> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(sign_token_ids))} </sign> <text> {text} </text>"
-        return seq, labels, raw
+
+        prefix_len = len(seq) - len(text_ids) - 1
+        if prefix_loss_weight > 0.0:
+            # First token has no prior context to predict it → stays -100.
+            # All remaining prefix tokens get real labels with lambda weight.
+            labels = [-100] + list(seq[1:prefix_len]) + text_ids + [self._token_id("</text>")]
+            weights = [0.0] + [prefix_loss_weight] * (prefix_len - 1) + [1.0] * (len(text_ids) + 1)
+            return seq, labels, weights, raw
+        else:
+            labels = [-100] * prefix_len + text_ids + [self._token_id("</text>")]
+            return seq, labels, None, raw
 
     def _build_mc_sample(
         self,
@@ -236,7 +256,7 @@ class SignLanguageTaskFormatter:
             f"<mc> <sign> {' '.join(self.tokenizer.convert_ids_to_tokens(prefix))} </sign> "
             f"<cont> {' '.join(self.tokenizer.convert_ids_to_tokens(target))} </cont>"
         )
-        return seq, labels, raw
+        return seq, labels, None, raw
 
     def build_batch(
         self,
@@ -245,23 +265,28 @@ class SignLanguageTaskFormatter:
         sign_token_ids: Sequence[Sequence[int]],
         mc_prefix_ratio: float = 0.5,
         mc_group_size: int = 1,
+        m2t_prefix_loss_weight: float = 0.0,
     ) -> CausalTaskBatch:
         if not (len(task_names) == len(texts) == len(sign_token_ids)):
             raise ValueError("task_names, texts, and sign_token_ids must have the same batch size.")
 
         sequences: List[List[int]] = []
         labels: List[List[int]] = []
+        weights: List[Optional[List[float]]] = []
         raw_sequences: List[str] = []
         normalized_tasks: List[str] = []
 
         for task_name, text, cur_sign_ids in zip(task_names, texts, sign_token_ids):
             task_name = str(task_name).lower()
             if task_name == "t2m":
-                seq, lab, raw = self._build_t2m_sample(text=text, sign_token_ids=cur_sign_ids)
+                seq, lab, wt, raw = self._build_t2m_sample(text=text, sign_token_ids=cur_sign_ids)
             elif task_name == "m2t":
-                seq, lab, raw = self._build_m2t_sample(text=text, sign_token_ids=cur_sign_ids)
+                seq, lab, wt, raw = self._build_m2t_sample(
+                    text=text, sign_token_ids=cur_sign_ids,
+                    prefix_loss_weight=m2t_prefix_loss_weight,
+                )
             elif task_name in ["mc", "pred", "continuation"]:
-                seq, lab, raw = self._build_mc_sample(
+                seq, lab, wt, raw = self._build_mc_sample(
                     sign_token_ids=cur_sign_ids,
                     prefix_ratio=mc_prefix_ratio,
                     group_size=mc_group_size,
@@ -272,7 +297,8 @@ class SignLanguageTaskFormatter:
 
             sequences.append(seq)
             labels.append(lab)
+            weights.append(wt)
             raw_sequences.append(raw)
             normalized_tasks.append(task_name)
 
-        return self._pad_and_stack(sequences, labels, raw_sequences, normalized_tasks)
+        return self._pad_and_stack(sequences, labels, raw_sequences, normalized_tasks, weights)
