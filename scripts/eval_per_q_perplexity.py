@@ -192,7 +192,7 @@ def compute_per_q_perplexity(
             shift_labels.view(-1),
             reduction="none",
             ignore_index=-100,
-        ).view(B, T)
+        ).view(B, T).float()
 
         # Classify each valid label position by q-layer
         for b in range(B):
@@ -202,7 +202,7 @@ def compute_per_q_perplexity(
 
             valid_pos = valid_mask.nonzero(as_tuple=True)[0]
             valid_tids = shift_labels[b][valid_pos].tolist()
-            valid_loss = per_token_loss[b][valid_pos].cpu().numpy()
+            valid_loss = per_token_loss[b][valid_pos].detach().cpu().float().numpy()
 
             # Filter sign tokens and tag part
             sign_indices = []
