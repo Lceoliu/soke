@@ -80,6 +80,23 @@ def run(cmd: list[str], env: dict[str, str] | None = None):
     subprocess.run(cmd, check=True, cwd=str(ROOT_DIR), env=env)
 
 
+def run_render_with_fallback(cmd: list[str], env: dict[str, str]):
+    explicit = env.get("PYOPENGL_PLATFORM", "").strip().lower()
+    candidates = [explicit] if explicit else ["egl", "osmesa"]
+    last_error = None
+    for platform in candidates:
+        cur_env = dict(env)
+        cur_env["PYOPENGL_PLATFORM"] = platform
+        try:
+            run(cmd, env=cur_env)
+            return
+        except subprocess.CalledProcessError as e:
+            last_error = e
+            print(f"[warn] render failed with PYOPENGL_PLATFORM={platform}, trying next backend...", flush=True)
+    if last_error is not None:
+        raise last_error
+
+
 def locate_prediction_pkl(sample_name: str, run_name: str, preferred_root: Path) -> Path:
     patterns = [
         str(preferred_root / "**" / f"{sample_name}.pkl"),
@@ -152,6 +169,7 @@ def main():
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(args.use_gpus)
     env.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    env.setdefault("PYOPENGL_PLATFORM", "egl")
     env["PYTHONUNBUFFERED"] = "1"
 
     run(
@@ -195,7 +213,7 @@ def main():
 
     for npy_path in written:
         sample_tag = npy_path.stem
-        run(
+        run_render_with_fallback(
             [
                 sys.executable,
                 "scripts/visualize_smplx_raw_mesh.py",
