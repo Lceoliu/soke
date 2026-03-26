@@ -11,6 +11,12 @@ import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
+import numpy as np
+
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -24,6 +30,22 @@ def _load_gzip_pickle(path: Path):
 def _save_gzip_pickle(path: Path, data):
     with gzip.open(path, "wb") as f:
         pickle.dump(data, f)
+
+
+def _to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if torch is not None and isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().tolist()
+    return obj
 
 
 def _symlink_force(src: Path, dst: Path):
@@ -50,12 +72,32 @@ def build_single_sample_subset(src_root: Path, dst_root: Path, sample_name: str,
         _save_gzip_pickle(dst_root / f"csl_clean.{s}", selected)
 
     with open(dst_root / "selected_samples.json", "w", encoding="utf-8") as f:
-        json.dump(selected, f, ensure_ascii=False, indent=2)
+        json.dump(_to_jsonable(selected), f, ensure_ascii=False, indent=2)
 
 
 def run(cmd: list[str], env: dict[str, str] | None = None):
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True, cwd=str(ROOT_DIR), env=env)
+
+
+def locate_prediction_pkl(sample_name: str, run_name: str, preferred_root: Path) -> Path:
+    patterns = [
+        str(preferred_root / "**" / f"{sample_name}.pkl"),
+        str((ROOT_DIR / "results") / "**" / run_name / "**" / f"{sample_name}.pkl"),
+        str((ROOT_DIR / "results") / "**" / f"{sample_name}.pkl"),
+    ]
+    matches = []
+    import glob
+    for pat in patterns:
+        matches.extend(glob.glob(pat, recursive=True))
+    uniq = sorted({str(Path(m).resolve()) for m in matches})
+    if not uniq:
+        raise FileNotFoundError(
+            f"No prediction pkl found for sample {sample_name!r}. "
+            f"Searched under {preferred_root} and {ROOT_DIR / 'results'}"
+        )
+    uniq.sort(key=lambda p: Path(p).stat().st_mtime, reverse=True)
+    return Path(uniq[0])
 
 
 def main():
@@ -131,13 +173,9 @@ def main():
         env=env,
     )
 
-    pred_root = results_root / "mgpt" / cfg.NAME
-    rank_dirs = sorted(pred_root.glob(f"{args.split}_rank_*"))
-    if not rank_dirs:
-        raise FileNotFoundError(f"No prediction rank dir found under {pred_root}")
-    pkl_path = rank_dirs[0] / f"{args.sample_name}.pkl"
-    if not pkl_path.exists():
-        raise FileNotFoundError(f"Prediction file not found: {pkl_path}")
+    preferred_pred_root = results_root / "mgpt" / cfg.NAME
+    pkl_path = locate_prediction_pkl(args.sample_name, cfg.NAME, preferred_pred_root)
+    pred_root = pkl_path.parent.parent
 
     with open(pkl_path, "rb") as f:
         item = pickle.load(f)
@@ -152,7 +190,6 @@ def main():
     for tag, key in [("pred", "feats_rst"), ("gt", "feats_ref")]:
         arr = item[key]
         save_p = npy_dir / f"{args.sample_name}_{tag}.npy"
-        import numpy as np
         np.save(save_p, np.asarray(arr, dtype=np.float32))
         written.append(save_p)
 
