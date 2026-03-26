@@ -11,6 +11,12 @@ import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
+import numpy as np
+
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -24,6 +30,22 @@ def _load_gzip_pickle(path: Path):
 def _save_gzip_pickle(path: Path, data):
     with gzip.open(path, "wb") as f:
         pickle.dump(data, f)
+
+
+def _to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if torch is not None and isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().tolist()
+    return obj
 
 
 def _symlink_force(src: Path, dst: Path):
@@ -50,7 +72,7 @@ def build_single_sample_subset(src_root: Path, dst_root: Path, sample_name: str,
         _save_gzip_pickle(dst_root / f"csl_clean.{s}", selected)
 
     with open(dst_root / "selected_samples.json", "w", encoding="utf-8") as f:
-        json.dump(selected, f, ensure_ascii=False, indent=2)
+        json.dump(_to_jsonable(selected), f, ensure_ascii=False, indent=2)
 
 
 def run(cmd: list[str], env: dict[str, str] | None = None):
@@ -152,7 +174,6 @@ def main():
     for tag, key in [("pred", "feats_rst"), ("gt", "feats_ref")]:
         arr = item[key]
         save_p = npy_dir / f"{args.sample_name}_{tag}.npy"
-        import numpy as np
         np.save(save_p, np.asarray(arr, dtype=np.float32))
         written.append(save_p)
 
