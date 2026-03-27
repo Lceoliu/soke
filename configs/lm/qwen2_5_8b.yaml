@@ -1,0 +1,20 @@
+target: mGPT.archs.mgpt_qwen.QwenCausalLM
+params:
+  model_type: qwen2_causal
+  model_path: ./deps/Qwen2.5-8B
+  stage: ${TRAIN.STAGE}
+  motion_codebook_size: ${model.params.motion_vae.params.code_num}
+  hand_codebook_size: ${model.params.hand_vae_cfg.params.code_num}
+  rhand_codebook_size: ${model.params.rhand_vae_cfg.params.code_num}
+  max_length: 1024
+  generation_max_new_tokens: 1024
+  trust_remote_code: true
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  gradient_checkpointing: true
+  mc_prefix_ratio: 0.5
+  torch_dtype: bfloat16
+  sign_streams: [body, lhand, rhand]
+  m2t_prefix_loss_weight: 0.5
