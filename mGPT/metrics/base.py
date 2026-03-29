@@ -5,6 +5,7 @@ from .t2m import TM2TMetrics
 from .mm import MMMetrics
 from .m2t import M2TMetrics
 from .m2m import PredMetrics
+from .mc_token import MCTokenMetrics
 
 
 class BaseMetrics(nn.Module):
@@ -27,6 +28,9 @@ class BaseMetrics(nn.Module):
                 diversity_times=30 if debug else cfg.METRIC.DIVERSITY_TIMES,
                 dist_sync_on_step=cfg.METRIC.DIST_SYNC_ON_STEP,
                 metric_prefix="mc_",
+            )
+            self.MCTokenMetrics = MCTokenMetrics(
+                dist_sync_on_step=cfg.METRIC.DIST_SYNC_ON_STEP,
             )
             self.M2TMetrics = M2TMetrics(
                 cfg=cfg,

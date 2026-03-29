@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -224,9 +225,16 @@ class SignLanguageTaskFormatter:
         prefix_ratio: float = 0.5,
         min_prefix_tokens: int = 6,
         group_size: int = 1,
+        random_prefix_ratio: bool = False,
+        prefix_ratio_min: float = 0.3,
+        prefix_ratio_max: float = 0.7,
     ):
         sign_token_ids = list(sign_token_ids)
         group_size = max(int(group_size), 1)
+        if random_prefix_ratio:
+            low = float(min(prefix_ratio_min, prefix_ratio_max))
+            high = float(max(prefix_ratio_min, prefix_ratio_max))
+            prefix_ratio = random.uniform(low, high)
         if len(sign_token_ids) < 2:
             prefix = sign_token_ids[:1]
             target = sign_token_ids[1:]
@@ -265,6 +273,10 @@ class SignLanguageTaskFormatter:
         sign_token_ids: Sequence[Sequence[int]],
         mc_prefix_ratio: float = 0.5,
         mc_group_size: int = 1,
+        mc_random_prefix_ratio: bool = False,
+        mc_prefix_ratio_min: float = 0.3,
+        mc_prefix_ratio_max: float = 0.7,
+        mc_min_prefix_tokens: int = 6,
         m2t_prefix_loss_weight: float = 0.0,
     ) -> CausalTaskBatch:
         if not (len(task_names) == len(texts) == len(sign_token_ids)):
@@ -289,7 +301,11 @@ class SignLanguageTaskFormatter:
                 seq, lab, wt, raw = self._build_mc_sample(
                     sign_token_ids=cur_sign_ids,
                     prefix_ratio=mc_prefix_ratio,
+                    min_prefix_tokens=mc_min_prefix_tokens,
                     group_size=mc_group_size,
+                    random_prefix_ratio=mc_random_prefix_ratio,
+                    prefix_ratio_min=mc_prefix_ratio_min,
+                    prefix_ratio_max=mc_prefix_ratio_max,
                 )
                 task_name = "mc"
             else:

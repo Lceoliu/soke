@@ -15,6 +15,10 @@ params:
   lora_dropout: 0.05
   gradient_checkpointing: false
   mc_prefix_ratio: 0.5
+  mc_random_prefix_ratio: false
+  mc_prefix_ratio_min: 0.3
+  mc_prefix_ratio_max: 0.7
+  mc_min_prefix_tokens: 6
   torch_dtype: bfloat16
   sign_streams: [body, lhand, rhand]
   m2t_prefix_loss_weight: 0.0

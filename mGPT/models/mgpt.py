@@ -285,7 +285,15 @@ class MotionGPT(BaseModel):
             tasks = [{"class": str(forced_task).lower()} for _ in range(len(texts))]
 
         # LLM Forward
-        outputs = self.lm(texts, tokens_ref, lengths, tasks, src=batch['src'], name=batch['name'])
+        outputs = self.lm(
+            texts,
+            tokens_ref,
+            lengths,
+            tasks,
+            src=batch['src'],
+            name=batch['name'],
+            randomize_mc_prefix=bool(self.training),
+        )
         # outputs = self.t2m_gpt.generate(texts)
         return {'outputs': outputs}
 
@@ -695,21 +703,22 @@ class MotionGPT(BaseModel):
         feats_ref_full = batch["motion"]
         if "motion_tokens" in batch and batch["motion_tokens"] is not None:
             motion_tokens = self._build_eval_motion_tokens(batch["motion_tokens"], batch["motion_token_length"])
-            lengths_full = batch["motion_token_length"]
+            token_lengths = batch["motion_token_length"]
         else:
-            lengths_full = batch["length"]
-            motion_tokens = self._build_eval_motion_tokens(feats_ref_full, lengths_full)
+            token_lengths = batch["length"]
+            motion_tokens = self._build_eval_motion_tokens(feats_ref_full, token_lengths)
+        frame_lengths = batch["length"]
         ratio = float(getattr(self.lm, "mc_prefix_ratio", 0.5))
 
         gen_results = self.lm.generate_conditional(
             motion_tokens=motion_tokens,
-            lengths=lengths_full,
+            lengths=token_lengths,
             task="mc",
             stage='test',
             src=batch['src'],
             name=batch['name'],
         )
-        feats_ref, lengths = self._build_suffix_reference_batch(feats_ref_full, lengths_full, ratio)
+        feats_ref, lengths = self._build_suffix_reference_batch(feats_ref_full, frame_lengths, ratio)
         feats_rst, rst_len = self._decode_generated_motion_parts(
             feats_ref=feats_ref,
             outputs_tokens=gen_results['outputs_tokens'],
@@ -1083,6 +1092,14 @@ class MotionGPT(BaseModel):
                             src=src,
                         )
                 elif eval_task == "mc":
+                    rs_set_mc_eval = self.train_lm_forward(batch, forced_task="mc")
+                    mc_outputs = rs_set_mc_eval["outputs"]
+                    if hasattr(self.metrics, 'MCTokenMetrics'):
+                        getattr(self.metrics, 'MCTokenMetrics').update(
+                            logits=mc_outputs.logits if hasattr(mc_outputs, "logits") else None,
+                            labels=getattr(mc_outputs, "labels", None),
+                            group_size=self.lm.num_token_parts,
+                        )
                     rs_set_mc = self.val_mc_forward(batch)
                     if hasattr(self.metrics, 'MCMetrics'):
                         getattr(self.metrics, 'MCMetrics').update(

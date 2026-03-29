@@ -54,6 +54,10 @@ class QwenCausalLM(nn.Module):
         lora_dropout: float = 0.05,
         gradient_checkpointing: bool = True,
         mc_prefix_ratio: float = 0.5,
+        mc_random_prefix_ratio: bool = False,
+        mc_prefix_ratio_min: float = 0.3,
+        mc_prefix_ratio_max: float = 0.7,
+        mc_min_prefix_tokens: int = 6,
         torch_dtype: str = "bfloat16",
         sign_streams: Optional[Sequence[str]] = None,
         num_quantizers: int = 1,
@@ -74,6 +78,10 @@ class QwenCausalLM(nn.Module):
         self.rhand_codebook_size = int(rhand_codebook_size)
         self.num_quantizers = int(max(num_quantizers, 1))
         self.mc_prefix_ratio = float(mc_prefix_ratio)
+        self.mc_random_prefix_ratio = bool(mc_random_prefix_ratio)
+        self.mc_prefix_ratio_min = float(mc_prefix_ratio_min)
+        self.mc_prefix_ratio_max = float(mc_prefix_ratio_max)
+        self.mc_min_prefix_tokens = int(mc_min_prefix_tokens)
         self.m2t_prefix_loss_weight = float(m2t_prefix_loss_weight)
         self.sign_streams = normalize_sign_streams(sign_streams)
         self.num_token_parts = int(len(self.sign_streams))
@@ -332,6 +340,7 @@ class QwenCausalLM(nn.Module):
         tasks=None,
         src: Optional[List[str]] = None,
         name: Optional[List[str]] = None,
+        randomize_mc_prefix: bool = False,
     ):
         task_names = []
         sign_token_ids = []
@@ -347,6 +356,10 @@ class QwenCausalLM(nn.Module):
             sign_token_ids=sign_token_ids,
             mc_prefix_ratio=self.mc_prefix_ratio,
             mc_group_size=self.num_token_parts,
+            mc_random_prefix_ratio=bool(randomize_mc_prefix and self.mc_random_prefix_ratio),
+            mc_prefix_ratio_min=self.mc_prefix_ratio_min,
+            mc_prefix_ratio_max=self.mc_prefix_ratio_max,
+            mc_min_prefix_tokens=self.mc_min_prefix_tokens,
             m2t_prefix_loss_weight=self.m2t_prefix_loss_weight,
         )
 
@@ -364,14 +377,17 @@ class QwenCausalLM(nn.Module):
             logits = outputs.logits
             loss_weights = batch.loss_weights.to(self.device)
             outputs.loss = self._weighted_causal_lm_loss(logits, labels, loss_weights)
+            outputs.labels = labels
             return outputs
         else:
-            return self.language_model(
+            outputs = self.language_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
                 return_dict=True,
             )
+            outputs.labels = labels
+            return outputs
 
     @staticmethod
     def _weighted_causal_lm_loss(
