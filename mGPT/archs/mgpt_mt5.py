@@ -32,6 +32,9 @@ class SignEmbeddingProjection(nn.Module):
             self.proj = nn.Linear(input_dim, output_dim)
 
     def forward(self, x: Tensor) -> Tensor:
+        proj_dtype = self.norm.weight.dtype
+        if x.dtype != proj_dtype:
+            x = x.to(dtype=proj_dtype)
         return self.proj(self.norm(x))
 
 
@@ -186,7 +189,10 @@ class MT5Seq2SeqLM(nn.Module):
             sign_embeds = motion_features  # [B, T, 133]
             sign_lengths = [int(l) for l in lengths]
 
-        sign_embeds = self.sign_proj(sign_embeds.to(dtype=self.model_dtype))
+        proj_dtype = self.sign_proj.norm.weight.dtype
+        sign_embeds = self.sign_proj(sign_embeds.to(dtype=proj_dtype))
+        if sign_embeds.dtype != self.model_dtype:
+            sign_embeds = sign_embeds.to(dtype=self.model_dtype)
         return sign_embeds, sign_lengths
 
     def _encode_with_vaes(
