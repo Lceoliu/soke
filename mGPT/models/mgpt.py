@@ -102,8 +102,30 @@ class MotionGPT(BaseModel):
                 self.rhand_vae.training = False
                 for p in self.rhand_vae.parameters():
                     p.requires_grad = False
+            # For seq2seq models that need VAE embeddings, compute the
+            # input dimension from the frozen VAEs and pass it as a plain
+            # integer — NOT the nn.Module itself — to avoid polluting
+            # Lightning hparams with full model weights.
+            if lm['params'].get('vae_dim') is None:
+                _vae_dim = 0
+                for _attr in ('vae', 'hand_vae', 'rhand_vae'):
+                    _m = getattr(self, _attr, None)
+                    if _m is not None:
+                        _vae_dim += int(getattr(_m, 'code_dim', getattr(_m, 'output_emb_width', 512)))
+                if _vae_dim > 0:
+                    lm['params']['vae_dim'] = _vae_dim
+
             # Instantiate motion-language model
             self.lm = instantiate_from_config(lm)
+
+            # Attach frozen VAE references as plain Python attributes (not
+            # nn.Module children) so they are available for runtime encoding
+            # but do NOT appear in lm.state_dict() as duplicate keys.
+            if getattr(self.lm, 'needs_raw_features', False):
+                for _attr, _key in [('vae', '_vae'), ('hand_vae', '_hand_vae'), ('rhand_vae', '_rhand_vae')]:
+                    _m = getattr(self, _attr, None)
+                    if _m is not None:
+                        object.__setattr__(self.lm, _key, _m)
 
         # Instantiate the losses
         self._losses = torch.nn.ModuleDict({
@@ -255,6 +277,18 @@ class MotionGPT(BaseModel):
         return outputs
 
     def train_lm_forward(self, batch, forced_task=None):
+        # Seq2seq models (e.g. mT5) operate on raw motion features directly
+        if getattr(self.lm, 'needs_raw_features', False):
+            outputs = self.lm(
+                texts=batch["text"],
+                motion_features=batch["motion"],
+                lengths=batch["length"],
+                tasks=batch.get("tasks"),
+                src=batch.get('src'),
+                name=batch.get('name'),
+            )
+            return {'outputs': outputs}
+
         has_precomputed_tokens = "motion_tokens" in batch and batch["motion_tokens"] is not None
         tokens_ref = batch["motion_tokens"] if has_precomputed_tokens else batch["motion"]
         texts = batch["text"]
@@ -672,6 +706,25 @@ class MotionGPT(BaseModel):
     def val_m2t_forward(self, batch):
         feats_ref = batch["motion"]
         texts = batch["text"]
+
+        # Seq2seq models use raw features instead of discrete tokens
+        if getattr(self.lm, 'needs_raw_features', False):
+            outputs = self.lm.generate_conditional(
+                motion_features=feats_ref,
+                lengths=batch["length"],
+                task="m2t",
+                stage='test',
+                src=batch.get('src'),
+                name=batch.get('name'),
+            )
+            rs_set = {
+                "m_ref": feats_ref,
+                "t_ref": texts,
+                "t_pred": outputs["outputs"],
+                "length": batch["length"],
+            }
+            return rs_set
+
         if "motion_tokens" in batch and batch["motion_tokens"] is not None:
             motion_tokens = self._build_eval_motion_tokens(batch["motion_tokens"], batch["motion_token_length"])
             lengths = batch["motion_token_length"]

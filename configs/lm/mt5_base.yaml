@@ -1,0 +1,15 @@
+target: mGPT.archs.mgpt_mt5.MT5Seq2SeqLM
+params:
+  model_type: mt5_seq2seq
+  model_path: deps/mt5-base
+  stage: ${TRAIN.STAGE}
+  vae_dim: null
+  max_length: 512
+  generation_max_new_tokens: 256
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  gradient_checkpointing: true
+  torch_dtype: bfloat16
+  use_mlp_proj: false

@@ -157,6 +157,17 @@ class VQVae(nn.Module):
         # latent, dist
         return code_idx, None
 
+    def encode_continuous(self, features: Tensor) -> Tensor:
+        """Return continuous encoder embeddings before quantization.
+
+        Returns shape ``[B, T', code_dim]`` where ``T'`` is the temporally
+        down-sampled length determined by the encoder architecture.
+        """
+        x_in = self.preprocess(features)         # [B, D_feat, T]
+        x_encoder = self.encoder(x_in)           # [B, D_enc, T']
+        x_encoder = self.quantize_in(x_encoder)  # [B, code_dim, T']
+        return self.postprocess(x_encoder)        # [B, T', code_dim]
+
     def decode(self, z: Tensor):
 
         x_d = self.quantizer.dequantize(z)

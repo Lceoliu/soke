@@ -145,33 +145,40 @@ class H2SDataModule(BASEDataModule):
             # else:
                 # self.Dataset = MotionDataset
         elif 'lm' in cfg.TRAIN.STAGE:
-            self.hparams.code_path = cfg.DATASET.CODE_PATH
-            self.hparams.task_path = cfg.DATASET.TASK_PATH
-            self.hparams.std_text = cfg.DATASET.H2S.STD_TEXT
+            use_raw_motion = getattr(cfg.DATASET.H2S, 'USE_RAW_MOTION', False)
+            if use_raw_motion:
+                # For models that consume continuous features (e.g. mT5),
+                # use the eval dataset which returns raw 133-dim motion.
+                self.hparams.std_text = cfg.DATASET.H2S.STD_TEXT
+                self.Dataset = Text2MotionDatasetEval
+            else:
+                self.hparams.code_path = cfg.DATASET.CODE_PATH
+                self.hparams.task_path = cfg.DATASET.TASK_PATH
+                self.hparams.std_text = cfg.DATASET.H2S.STD_TEXT
 
-            # LM token files may already be flattened from [T, Q, P] to [T*Q, P].
-            # We pass shared Q and active part count so dataset length clipping stays correct.
-            model_params = cfg.model.params
-            body_q = _extract_num_quantizers(model_params.get("motion_vae", None), default_q=1)
-            q_list = [body_q]
-            num_parts = 1
-            body_code_num = _extract_codebook_size(model_params.get("motion_vae", None), default_code_num=0)
-            hand_code_num = body_code_num
-            rhand_code_num = body_code_num
-            if model_params.get("hand_vae_cfg", None) is not None:
-                q_list.append(_extract_num_quantizers(model_params.get("hand_vae_cfg"), default_q=body_q))
-                num_parts += 1
-                hand_code_num = _extract_codebook_size(model_params.get("hand_vae_cfg"), default_code_num=body_code_num)
-            if model_params.get("rhand_vae_cfg", None) is not None:
-                q_list.append(_extract_num_quantizers(model_params.get("rhand_vae_cfg"), default_q=body_q))
-                num_parts += 1
-                rhand_code_num = _extract_codebook_size(model_params.get("rhand_vae_cfg"), default_code_num=body_code_num)
-            self.hparams.lm_token_num_quantizers = int(min(q_list))
-            self.hparams.lm_token_num_parts = int(num_parts)
-            self.hparams.lm_body_codebook_size = int(body_code_num)
-            self.hparams.lm_hand_codebook_size = int(hand_code_num)
-            self.hparams.lm_rhand_codebook_size = int(rhand_code_num)
-            self.Dataset = Text2MotionDatasetCB
+                # LM token files may already be flattened from [T, Q, P] to [T*Q, P].
+                # We pass shared Q and active part count so dataset length clipping stays correct.
+                model_params = cfg.model.params
+                body_q = _extract_num_quantizers(model_params.get("motion_vae", None), default_q=1)
+                q_list = [body_q]
+                num_parts = 1
+                body_code_num = _extract_codebook_size(model_params.get("motion_vae", None), default_code_num=0)
+                hand_code_num = body_code_num
+                rhand_code_num = body_code_num
+                if model_params.get("hand_vae_cfg", None) is not None:
+                    q_list.append(_extract_num_quantizers(model_params.get("hand_vae_cfg"), default_q=body_q))
+                    num_parts += 1
+                    hand_code_num = _extract_codebook_size(model_params.get("hand_vae_cfg"), default_code_num=body_code_num)
+                if model_params.get("rhand_vae_cfg", None) is not None:
+                    q_list.append(_extract_num_quantizers(model_params.get("rhand_vae_cfg"), default_q=body_q))
+                    num_parts += 1
+                    rhand_code_num = _extract_codebook_size(model_params.get("rhand_vae_cfg"), default_code_num=body_code_num)
+                self.hparams.lm_token_num_quantizers = int(min(q_list))
+                self.hparams.lm_token_num_parts = int(num_parts)
+                self.hparams.lm_body_codebook_size = int(body_code_num)
+                self.hparams.lm_hand_codebook_size = int(hand_code_num)
+                self.hparams.lm_rhand_codebook_size = int(rhand_code_num)
+                self.Dataset = Text2MotionDatasetCB
         elif cfg.TRAIN.STAGE == "token":
             self.Dataset = Text2MotionDatasetToken
             self.DatasetEval = Text2MotionDatasetToken
