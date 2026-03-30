@@ -19,6 +19,11 @@ from mGPT.utils.load_checkpoint import load_pretrained, load_pretrained_vae
 
 
 def _load_cfg(cfg_path: str):
+    try:
+        OmegaConf.register_new_resolver("eval", eval)
+    except ValueError:
+        # Already registered in this process.
+        pass
     cfg_assets = OmegaConf.load("./configs/assets.yaml")
     cfg_base = OmegaConf.load(f"{cfg_assets.CONFIG_FOLDER}/default.yaml")
     cfg_exp = OmegaConf.merge(cfg_base, OmegaConf.load(cfg_path))
