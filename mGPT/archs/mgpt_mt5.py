@@ -79,6 +79,7 @@ class MT5Seq2SeqLM(nn.Module):
         gradient_checkpointing: bool = True,
         torch_dtype: str = "bfloat16",
         use_mlp_proj: bool = False,
+        contrastive_pretrain_ckpt: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -119,6 +120,13 @@ class MT5Seq2SeqLM(nn.Module):
         input_dim = self._resolve_input_dim(vae_dim)
         self.sign_proj = SignEmbeddingProjection(input_dim, d_model, use_mlp=use_mlp_proj)
 
+        # --- Contrastive pre-trained projection initialisation ---
+        # When contrastive_pretrain_ckpt is provided, load the sign_proj weights
+        # from the contrastive pre-training run (scripts/train_contrastive_pretrain.py).
+        # This initialises sign_proj to a text-aligned state before LM fine-tuning.
+        if contrastive_pretrain_ckpt is not None:
+            self._load_contrastive_pretrain(contrastive_pretrain_ckpt)
+
         # --- LoRA ---
         if use_lora:
             self._apply_lora(rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
@@ -152,6 +160,41 @@ class MT5Seq2SeqLM(nn.Module):
         if key not in mapping:
             raise ValueError(f"Unsupported torch_dtype: {torch_dtype}")
         return mapping[key]
+
+    def _load_contrastive_pretrain(self, ckpt_path: str) -> None:
+        """Load sign projection weights from contrastive pre-training checkpoint.
+
+        The checkpoint is the ``state_dict`` of a ``SignProjection`` module saved by
+        ``scripts/train_contrastive_pretrain.py``.  Key mapping:
+          norm.weight / norm.bias   → self.sign_proj.norm.*
+          proj.0.weight / proj.0.bias → first linear in sign_proj.proj
+          proj.2.weight / proj.2.bias → second linear in sign_proj.proj (if MLP)
+          proj.weight / proj.bias     → single linear in sign_proj.proj (if Linear)
+
+        Dimension mismatch is handled gracefully: if the checkpoint projection dim
+        differs from sign_proj's output dim, a shape warning is printed and the
+        weight is skipped (only the LayerNorm is transferred).
+        """
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(
+                f"Contrastive pre-train checkpoint not found: {ckpt_path}"
+            )
+        state = torch.load(ckpt_path, map_location="cpu")
+        current = self.sign_proj.state_dict()
+        loaded, skipped = [], []
+        for key, val in state.items():
+            if key in current and current[key].shape == val.shape:
+                current[key] = val
+                loaded.append(key)
+            else:
+                skipped.append(
+                    f"{key}: ckpt {tuple(val.shape)} vs model {tuple(current.get(key, torch.empty(0)).shape)}"
+                )
+        self.sign_proj.load_state_dict(current)
+        print(
+            f"[contrastive_ckpt] Loaded {len(loaded)} tensors from {ckpt_path}"
+            + (f"; skipped: {skipped}" if skipped else "")
+        )
 
     def _apply_lora(self, rank: int, alpha: int, dropout: float):
         lora_cfg = LoraConfig(

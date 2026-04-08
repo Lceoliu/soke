@@ -27,3 +27,5 @@ BlenderToolBox/
 data/**
 *.log
 reports/**
+
+!research-wiki/**

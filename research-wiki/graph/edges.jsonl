@@ -1,0 +1,27 @@
+{"from": "paper:zuo2024_soke", "to": "paper:jiang2023_motiongpt", "type": "extends", "note": "SOKE extends MotionGPT's VQ-VAE + LM paradigm to sign language with per-body-part tokenization and multilingual LM"}
+{"from": "paper:li2025_unisign", "to": "paper:zuo2024_soke", "type": "extends", "note": "Uni-Sign builds on sign language LM ideas but shifts to large-scale pre-training and seq2seq SLT unification"}
+{"from": "idea:001", "to": "paper:zuo2024_soke", "type": "inspired_by", "note": "LFQ tokenizer redesign motivated by limitations of SOKE's original VQ reconstruction quality"}
+{"from": "idea:001", "to": "paper:jiang2023_motiongpt", "type": "inspired_by", "note": "VQ-VAE training pattern and loss structure borrowed from MotionGPT"}
+{"from": "idea:002", "to": "paper:jiang2023_motiongpt", "type": "inspired_by", "note": "Qwen decoder-only unified modeling directly follows MotionGPT's motion-as-foreign-language paradigm"}
+{"from": "idea:002", "to": "paper:zuo2024_soke", "type": "inspired_by", "note": "Extends SOKE's tokenizer to Qwen backbone"}
+{"from": "idea:003", "to": "paper:li2025_unisign", "type": "inspired_by", "note": "Pivot to mT5 seq2seq motivated by Uni-Sign's finding that objective alignment between pretraining and finetuning is critical"}
+{"from": "idea:004", "to": "paper:zuo2024_soke", "type": "inspired_by", "note": "Uses CSL-Daily dataset from SOKE baseline to probe VAE embedding quality"}
+{"from": "idea:001", "to": "gap:G1", "type": "addresses_gap", "note": "LFQ experiment probes whether better reconstruction implies LM-compatibility"}
+{"from": "idea:002", "to": "gap:G2", "type": "addresses_gap", "note": "Qwen full-train is the main experiment revealing the generalization failure gap"}
+{"from": "idea:002", "to": "gap:G3", "type": "addresses_gap", "note": "Qwen unified t2m+m2t+mc training is a direct attempt at G3"}
+{"from": "idea:003", "to": "gap:G2", "type": "addresses_gap", "note": "mT5 is alternative attempt to address generalization failure"}
+{"from": "idea:003", "to": "gap:G3", "type": "addresses_gap", "note": "mT5 is a seq2seq alternative to unified AR"}
+{"from": "idea:004", "to": "gap:G1", "type": "addresses_gap", "note": "Classifier probe checks if VAE embeddings carry sufficient discriminative information for downstream tasks"}
+{"from": "exp:001", "to": "claim:C1", "type": "supports", "note": "Reconstruction experiment confirms LFQ+losses improve quality"}
+{"from": "exp:001", "to": "idea:001", "type": "supports", "note": "Confirms reconstruction improvement branch of idea:001 hypothesis"}
+{"from": "exp:002", "to": "claim:C3", "type": "supports", "note": "Overfit experiments confirm pipeline correctness"}
+{"from": "exp:002", "to": "idea:002", "type": "supports", "note": "Pipeline sanity check for Qwen approach"}
+{"from": "exp:003", "to": "idea:002", "type": "invalidates", "note": "Full train generalization failure invalidates Qwen decoder-only unified hypothesis at current scale"}
+{"from": "exp:003", "to": "claim:C2", "type": "supports", "note": "Full train failure despite good reconstruction supports C2"}
+{"from": "exp:004", "to": "claim:C4", "type": "supports", "note": "Motion shuffle confirms mT5 uses motion embeddings"}
+{"from": "exp:004", "to": "idea:003", "type": "invalidates", "note": "mT5 full train fails generalization (though motion is used)"}
+{"from": "exp:005", "to": "claim:C5", "type": "supports", "note": "1024-way cross-signer classifier confirms VAE embedding discriminability"}
+{"from": "exp:005", "to": "idea:004", "type": "supports", "note": "Classifier succeeds, confirming embedding quality is not the bottleneck"}
+{"from": "claim:C1", "to": "gap:G1", "type": "addresses_gap", "note": "C1 is partial evidence about what LFQ does to reconstruction, relevant to G1"}
+{"from": "claim:C2", "to": "gap:G1", "type": "addresses_gap", "note": "C2 directly highlights the reconstruction/LM-compatibility gap"}
+{"from": "claim:C5", "to": "gap:G2", "type": "addresses_gap", "note": "C5 rules out embedding quality as cause of G2 generalization failure"}
