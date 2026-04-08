@@ -23,27 +23,24 @@
 
 ---
 
-## M1: Full Contrastive Pre-train — PENDING
+## M1: Full Contrastive Pre-train — DONE ✓
 
 **Run**: R002 — Full contrastive pre-training on CSL-Daily train set (~17k samples)
 
-**Command**:
-```bash
-python scripts/train_contrastive_pretrain.py \
-    --cfg configs/soke_mt5_csl_m2t.yaml \
-    --output_dir experiments/contrastive_pretrain_csl \
-    --epochs 80 \
-    --batch_size 256 \
-    --lr 1e-4 \
-    --weight_decay 1e-4 \
-    --proj_dim 768 \
-    --temperature 0.07 \
-    --seed 42 \
-    --gpu 0 \
-    --num_workers 8 \
-    --cache_dir experiments/contrastive_pretrain_csl/cache \
-    2>&1 | tee experiments/contrastive_pretrain_csl/train.log
-```
+**Results** (80 epochs, batch_size=512, GPU 0, ~13 min total):
+
+| Metric | Epoch 1 | Epoch 80 | Change |
+|--------|---------|----------|--------|
+| train_loss (InfoNCE) | 6.0752 | 3.5406 | −41.7% |
+| val_loss | 5.6977 | 4.0157 | −29.5% |
+| acc_s2t (top-1/512 negatives) | 0.7% | **27.7%** | +27.0pp |
+| temperature | 0.0699 | 0.0612 | learned |
+
+**Checkpoint**: `experiments/contrastive_pretrain_csl/best_sign_proj.pt` (7.1 MB)
+- Keys: `norm.weight [1536]`, `proj.0.weight [768×1536]`, `proj.2.weight [768×768]`
+- Compatible with `MT5Seq2SeqLM.sign_proj` when `use_mlp_proj=True`
+
+**Interpretation**: acc_s2t=27.7% (top-1 among 512 negatives) indicates strong sign-text alignment learning. A random model would achieve 1/512 ≈ 0.2%. The projection learned to map sign VAE embeddings into a space where correct text can be retrieved with 27.7% top-1 accuracy.
 
 ---
 

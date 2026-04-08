@@ -3,7 +3,7 @@
 | Run ID | Milestone | Block | Purpose | System / Variant | Dataset | Split | Metrics | Priority | Status | Notes |
 |--------|-----------|-------|---------|------------------|---------|-------|---------|----------|--------|-------|
 | R001 | M0 | — | Sanity: contrastive pre-train loop correctness | Contrastive pre-train (100 CSL pairs) | CSL-Daily | train (100 samples) | InfoNCE↓, cosine_sim↑ | MUST | DONE | PASS ✓ train_loss 4.56→4.30 (-5.6%), val_pos_sim -0.085→+0.204 (+0.289). Ckpt: experiments/contrastive_pretrain_sanity/best_sign_proj.pt |
-| R002 | M1 | — | Full contrastive pre-training | Contrastive pre-train (sign projection + text projection, InfoNCE) | CSL-Daily | train | InfoNCE↓, cosine_sim val distribution | MUST | TODO | Batch≥256; cache sign embeddings; 50–100 epochs; save best checkpoint |
+| R002 | M1 | — | Full contrastive pre-training | Contrastive pre-train (sign projection + text projection, InfoNCE) | CSL-Daily | train | InfoNCE↓, cosine_sim val distribution | MUST | DONE | PASS ✓ train_loss 6.08→3.54 (−41.7%), val_loss 5.70→4.02 (−29.5%), acc_s2t 0.7%→27.7% (top-1/512). T=0.07→0.061. Ckpt: experiments/contrastive_pretrain_csl/best_sign_proj.pt (7.1MB) |
 | R003 | M2 | B1 | Main result seed 1 | Ours: contrastive pre-train → mT5-base LoRA fine-tune | CSL-Daily | test | BLEU4, ROUGE-L, WER | MUST | TODO | Use R002 checkpoint; LoRA rank=64, alpha=128, pw=0.5 |
 | R004 | M2 | B1 | Main result seed 2 | Ours: contrastive pre-train → mT5-base LoRA fine-tune | CSL-Daily | test | BLEU4, ROUGE-L, WER | MUST | TODO | Different random seed |
 | R005 | M2 | B1 | Main result seed 3 | Ours: contrastive pre-train → mT5-base LoRA fine-tune | CSL-Daily | test | BLEU4, ROUGE-L, WER | MUST | TODO | Different random seed |

@@ -103,8 +103,11 @@ def load_csl_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
     if need_pose:
         for frame_id, frame in enumerate(frame_list):
             frame = os.path.join(data_dir, 'poses', name, frame)
-            with open(frame, 'rb') as f: 
-                poses = pickle.load(f)
+            try:
+                with open(frame, 'rb') as f:
+                    poses = pickle.load(f)
+            except (EOFError, Exception):
+                return None, None, None, None
 
             pose = np.concatenate([poses[key] for key in keys], 0)
             clip_poses[frame_id] = pose

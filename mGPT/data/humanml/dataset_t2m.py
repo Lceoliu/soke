@@ -128,7 +128,10 @@ class Text2MotionDataset(data.Dataset):
             clip_poses, text, name, _ = load_csl_sample(sample, self.csl_root)
         elif src == 'phoenix':
             clip_poses, text, name, _ = load_phoenix_sample(sample, self.phoenix_root)
-        
+
+        if clip_poses is None:
+            return self.__getitem__((idx + 1) % len(self.all_data))
+
         all_captions = [text]
 
         clip_poses = (clip_poses - self.mean.numpy())/(self.std.numpy()+1e-10)

@@ -169,6 +169,10 @@ class Text2MotionDatasetEval(Text2MotionDataset):
                 need_code=bool(self.code_path),
             )
         
+        if clip_poses is None:
+            # Corrupted or unreadable sample — fall back to a neighbouring one
+            return self.__getitem__((idx + 1) % len(self.all_data))
+
         all_captions = [text]
         all_captions = all_captions * 3  #?
 
