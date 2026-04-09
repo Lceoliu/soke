@@ -25,3 +25,31 @@
 {"from": "claim:C1", "to": "gap:G1", "type": "addresses_gap", "note": "C1 is partial evidence about what LFQ does to reconstruction, relevant to G1"}
 {"from": "claim:C2", "to": "gap:G1", "type": "addresses_gap", "note": "C2 directly highlights the reconstruction/LM-compatibility gap"}
 {"from": "claim:C5", "to": "gap:G2", "type": "addresses_gap", "note": "C5 rules out embedding quality as cause of G2 generalization failure"}
+{"from": "paper:ye2024_signcl", "to": "paper:zhou2023_gfslt_vlp", "type": "extends", "note": "SignCL adds margin-based frame contrastive loss to GFSLT-VLP backbone to reduce representation density"}
+{"from": "paper:sincan2025_unbiased_eval", "to": "paper:ye2024_signcl", "type": "critiques", "note": "Unbiased eval shows SignCL's +5 B@4 over baseline shrinks to +0.4-0.8 B@4 under controlled conditions"}
+{"from": "paper:sincan2025_unbiased_eval", "to": "paper:zhou2023_gfslt_vlp", "type": "critiques", "note": "Unbiased eval of GFSLT-VLP gives 21.97±0.27 B@4 on PHOENIX vs. inflated published numbers"}
+{"from": "paper:guo2025_pseudogloss", "to": "paper:zhou2023_gfslt_vlp", "type": "extends", "note": "PGG-SLT adds LLM-generated pseudo-glosses as intermediate supervision on top of gloss-free pipeline"}
+{"from": "paper:ye2024_signcl", "to": "gap:G2", "type": "addresses_gap", "note": "SignCL's representation density analysis directly explains why gloss-free contrastive pre-training fails to improve translation"}
+{"from": "paper:guo2025_pseudogloss", "to": "gap:G4", "type": "addresses_gap", "note": "Pseudo-gloss generation provides intermediate compositional signal addressing G4 alignment gap"}
+{"from": "paper:sincan2025_unbiased_eval", "to": "gap:G2", "type": "addresses_gap", "note": "Calibrates expectation: contrastive pretraining contributes <1 B@4 gain under fair evaluation — failure mechanism is not pretraining objective"}
+{"from": "exp:M2_R003", "to": "paper:ye2024_signcl", "type": "consistent_with", "note": "M2 failure (best B@4=1.78 vs baseline 1.74, +0.04) is consistent with SignCL's finding that contrastive gains are <0.5 B@4 under fair evaluation"}
+{"from": "idea:005", "to": "paper:li2025_unisign", "type": "inspired_by", "note": "Uni-Sign's per-body-part encoder separation directly motivates Option B (separate sub-graph GCN per body part)"}
+{"from": "idea:005", "to": "gap:G7", "type": "addresses_gap", "note": "ST-GCN VAE encoder is the proposed fix for Conv1d architectural naivety"}
+{"from": "idea:005", "to": "gap:G5", "type": "addresses_gap", "note": "Better encoder should close part of the 10 B@4 gap between our pipeline and GFSLT-VLP video-encoder methods"}
+{"from": "idea:005", "to": "gap:G6", "type": "addresses_gap", "note": "Richer per-frame graph representations should reduce temporal density"}
+{"from": "exp:006", "to": "idea:005", "type": "motivates", "note": "M2 failure analysis (global contrastive insufficient) motivates architectural fix at encoder level"}
+{"from": "paper:lin2023_motionx", "to": "gap:G7", "type": "addresses_gap", "note": "MotionX defines standard SMPL-X format (22-joint body tree + 30-joint hands) — provides the adjacency blueprint for ST-GCN encoder design"}
+{"from": "paper:motionmillion2024", "to": "gap:G1", "type": "addresses_gap", "note": "2D-LFQ and 6D rotation conversion are practical improvements over our current 1D Conv + axis-angle setup"}
+{"from": "paper:ye2024_dartcontrol", "to": "gap:G3", "type": "addresses_gap", "note": "DartControl's motion primitive AR chunking (H+F overlap) is a viable pattern for sign generation (t2m) at inference time"}
+{"from": "idea:006", "to": "gap:G2", "type": "addresses_gap", "note": "CTC alignment loss addresses dense-to-sparse mismatch that causes seq2seq generalization failure"}
+{"from": "idea:006", "to": "gap:G4", "type": "addresses_gap", "note": "CTC provides frame-level alignment signal without requiring gloss annotation — an alternative to attention-based cross-modal alignment"}
+{"from": "idea:005", "to": "paper:lin2023_motionx", "type": "uses", "note": "SMPL-X 22-joint kinematic tree from MotionX used to define adjacency matrix for ST-GCN encoder"}
+{"from": "idea:005", "to": "paper:motionmillion2024", "type": "uses", "note": "6D rotation conversion practice from MotionMillion applied before graph convolution on axis-angle params"}
+{"from": "paper:zhang2023_speechgpt", "to": "gap:G2", "type": "addresses_gap", "note": "SpeechGPT's HuBERT token insight explains G2: reconstruction tokens (acoustic class) cannot support bidirectional LM generalization"}
+{"from": "paper:hassid2024_voxtlm", "to": "gap:G3", "type": "addresses_gap", "note": "VoxtLM's 4-token control scheme is the direct template for unified t2m+m2t+mc with a single decoder-only LM"}
+{"from": "paper:defossez2024_moshi", "to": "gap:G4", "type": "addresses_gap", "note": "Moshi's semantic/acoustic split mirrors the need to separate sign linguistic content (semantic LFQ) from kinematic fidelity (acoustic LFQ)"}
+{"from": "idea:006", "to": "paper:hassid2024_voxtlm", "type": "inspired_by", "note": "VoxtLM's 4-task-token unified decoder-only design is directly adapted for sign language t2m/m2t/mc"}
+{"from": "idea:006", "to": "paper:zhang2023_speechgpt", "type": "inspired_by", "note": "SpeechGPT's HuBERT vs EnCodec analysis explains why our LFQ tokens fail as semantic units"}
+{"from": "idea:006", "to": "idea:005", "type": "depends_on", "note": "Unified AR (idea:006) requires semantically rich sign tokens; ST-GCN encoder (idea:005) is the prerequisite to achieve this"}
+{"from": "idea:006", "to": "idea:002", "type": "extends", "note": "Unified AR with Qwen (idea:002) was right in spirit; idea:006 is the same approach with correct tokenizer class"}
+{"from": "exp:006", "to": "idea:006", "type": "motivates", "note": "M2 failure analysis leads to the conclusion that tokenizer class (acoustic vs semantic) is the root cause, motivating idea:006"}

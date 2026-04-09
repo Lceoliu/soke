@@ -7,7 +7,11 @@
 | G1 | What makes a tokenizer/embedding suitable for downstream LM (not just reconstruction)? | unresolved | paper:zuo2024_soke, paper:jiang2023_motiongpt | idea:001, idea:004 |
 | G2 | Why does full-train generalization fail for both decoder-only and seq2seq sign-LM despite functional pipeline and discriminative embeddings? | unresolved | paper:li2025_unisign | idea:002, idea:003 |
 | G3 | How can unified multi-task sign language AR training (t2m + m2t + mc) be made to generalize at current data scales? | unresolved | paper:jiang2023_motiongpt, paper:li2025_unisign | idea:002 |
-| G4 | Is there a principled way to align sign language embedding space with text LM space beyond next-token prediction? | unresolved | paper:li2025_unisign | — |
+| G4 | Is there a principled way to align sign language embedding space with text LM space beyond next-token prediction? | partially_addressed | paper:li2025_unisign, paper:guo2025_pseudogloss | — |
+| G5 | Why is VAE-embedding-based SLT at ~1-2 B@4 when video-encoder-based methods reach ~12 B@4 on CSL-Daily? | unresolved | paper:sincan2025_unbiased_eval | — |
+| G6 | Does representation density in pre-computed VAE embeddings (not video) cause the same downstream translation failure as in video encoders? | unresolved | paper:ye2024_signcl | — |
+| G7 | Is Conv1d on flattened pose the architectural bottleneck? Would a graph-structured encoder (ST-GCN on 6D rotation) produce semantically richer VAE embeddings that enable unified AR? | unresolved | paper:li2025_unisign | idea:005 |
+| G8 | Our LFQ tokens are "acoustic class" (reconstruction-trained) not "semantic class" (self-supervised, like HuBERT). Can ST-GCN encoder alone push them into the semantic class needed for unified AR? | unresolved | paper:zhang2023_speechgpt, paper:hassid2024_voxtlm | idea:005, idea:006 |
 
 ## Gap Details
 
@@ -44,3 +48,29 @@
 ### G4 — Sign-Text Space Alignment Beyond Next-Token Prediction
 
 **Description:** Uni-Sign achieves good SLT by aligning pre-training and fine-tuning objectives. But it doesn't generate motion. A model that must both generate signs and translate them needs a deeper form of cross-modal alignment that next-token prediction alone may not provide.
+
+---
+
+### G5 — VAE-Embedding vs. Video-Encoder SLT Gap
+
+**Description:** The best gloss-free SLT methods using video encoders (S3D + contrastive) reach ~12 B@4 on CSL-Daily. Our pipeline using pre-computed VAE embeddings (skipping video) achieves ~1.7 B@4. The gap (~10 B@4) is unexplained.
+
+**Why it matters:** If the gap is due to information loss from VAE quantization/compression, then no amount of LM improvement will fix it. The tokenizer is the bottleneck, not the LM.
+
+**Candidate causes:**
+1. VAE embeddings have lower temporal resolution (downsampled) vs. S3D frame-level features
+2. VAE codebook collapse or high representation density → LM can't distinguish signs
+3. CSL-Daily training split used differently (video encoder methods vs. our pose-based pipeline)
+4. Missing spatial/visual features: VAE operates on pose, losing appearance info that helps translation
+
+**Needed experiment:** Run GFSLT-VLP-style evaluation on CSL-Daily with identical preprocessing to get a calibrated baseline; compare to our VAE pipeline.
+
+---
+
+### G6 — Representation Density in VAE Embedding Space
+
+**Description:** SignCL (Ye et al. 2024) shows that gloss-free video encoders produce embeddings where 92.59% of features are semantically similar, preventing downstream translation. The analogous metric for our VAE embedding space is unknown.
+
+**Why it matters:** If our 1536-dim VAE embeddings are even denser than video encoders, contrastive pre-training at the sequence level (as in M2) cannot help because the LM still sees an undifferentiated stream.
+
+**Needed experiment (R015):** Compute pairwise cosine similarity distribution of our VAE embeddings per sample (temporal density); compare before/after contrastive pre-training; compare to sign VAE embeddings from SOKE original.

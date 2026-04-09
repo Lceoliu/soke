@@ -44,9 +44,45 @@
 
 ---
 
-## M2: Fine-tune Comparison — PENDING
+## M2: Fine-tune Comparison — DONE ✗ (Hypothesis NOT supported)
 
-**Runs**: R003–R007 — Contrastive pre-train + mT5 vs. direct mT5 fine-tune
+**Runs**: R003 (contrastive+mT5) and R006 (baseline mT5), 80 epochs, 4 GPUs each, CSL-Daily
+
+### Key metrics (CSL-Daily val set, csl_BLEU subscore)
+
+| Metric | R003 contrastive | R006 baseline | Δ |
+|--------|------------------|----------------|---|
+| **Best csl_BLEU_4** (across 80 val rounds) | **1.778** | 1.742 | +0.04 |
+| **Best csl_BLEU_1** | **17.44** | 16.83 | +0.61 |
+| Final csl_BLEU_4 (E79) | 0.800 | **1.185** | −0.39 |
+| Final csl_BLEU_1 (E79) | 15.97 | **16.19** | −0.22 |
+| Final val_m2t_loss | 15.51 | 16.03 | −0.52 |
+
+### Decision gate
+
+- **Required**: BLEU4(contrastive) ≥ 2× BLEU4(baseline) ≈ 3.5
+- **Observed**: best 1.78 vs 1.74 — **gate FAILED** (essentially tied; not 2×)
+- **Final epoch**: contrastive is *worse* than baseline (0.80 vs 1.19)
+
+### Interpretation
+
+- Contrastive pre-training did **not** unlock m2t generalization on CSL-Daily.
+- Both runs plateau at very low BLEU4 (~1) and BLEU1 ~16, suggesting both are stuck near unigram-frequency baselines — the model is not learning sentence structure.
+- The contrastive init gives a *marginal* early-training advantage (better best-Bleu1) but the benefit washes out and the final epoch is worse than baseline. Likely the model overfits and the projection drifts from the contrastive optimum.
+- Both runs show high val_m2t_loss (~15-16) and ppl ~1e8 — the loss/ppl numbers suggest a teacher-forcing/label-smoothing issue or that the metric is computed on a degenerate distribution; needs debugging.
+
+### Logs
+
+- `experiments/mgpt/SOKE_MT5_CSL_CONTRASTIVE/train.log` (27.7 MB, 80 epochs, last write 2026-04-09 04:00)
+- `experiments/mgpt/SOKE_MT5_CSL_M2T/train.log` (27.7 MB, 80 epochs, last write 2026-04-09 04:06)
+
+### Status
+
+**M2 gate FAILED.** Plan branch B5 (failure analysis) is now active. Do not launch R004/R005/R009-R012 until we understand why the contrastive signal didn't transfer.
+
+---
+
+## (legacy / reference) M2 plan
 
 **Command (contrastive + mT5)**:
 ```bash

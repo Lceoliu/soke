@@ -192,3 +192,65 @@
 - [ ] Simplicity is defended (B3: ours with mT5-base beats mT5-XL direct)
 - [ ] Frontier contribution is justified: contrastive pre-training is not novel in general, but applying it to 3D pose VAE embeddings for sign language is; the paper's novelty is the insight + demonstration for this domain
 - [ ] Nice-to-have runs are separated from must-run runs (B4 Qwen, PHOENIX marked NICE-TO-HAVE)
+
+---
+
+## REPLAN: B5 Failure Analysis — Activated 2026-04-09
+
+> M2 gate FAILED. Best csl_BLEU4: contrastive=1.778 vs. baseline=1.742 (+0.04, not 2×).
+> B5 failure analysis is now the primary path. Blocks B2-B4 are paused.
+
+### Failure Hypotheses (ranked by confidence)
+
+| Priority | Hypothesis | Evidence | Diagnostic Experiment |
+|---|---|---|---|
+| H1 (HIGH) | Sequence-level InfoNCE alignment ≠ token-level decodability | Mean-pool contrastive gives global retrieval but not per-frame discrimination; consistent with SignCL (Ye 2024 NeurIPS) | R015: temporal density audit |
+| H2 (HIGH) | VAE temporal density too high for LM decoding | Adjacent sign frames near-identical → attention degeneracy | R015: pairwise cosine_sim within-sample |
+| H3 (MEDIUM) | val_m2t_loss / PPL metric bug | PPL ~1e8 inconsistent with BLEU1=16; teacher-forcing label shift? | Code inspection + manual forward pass check |
+| H4 (MEDIUM) | Data scale insufficient (18k CSL-Daily vs. 100k+ in GFSLT-VLP pretraining) | Field's best gloss-free needs large-scale pretraining corpus | Compare with GFSLT-VLP (S3D on Kinetics) |
+| H5 (LOW) | LoRA capacity insufficient for projection adaptation | rank=64 should be sufficient for 768-dim | Ablation: increase rank or unfreeze more params |
+
+### New Experiment Sequence
+
+**Phase F1: Diagnosis (no GPU needed / <1h)**
+- [ ] **F1-A**: Inspect val_m2t_loss computation in mgpt_mt5.py — check label shift, padding, reduction
+- [ ] **F1-B**: Run R015 (density audit): compute within-sample temporal cosine_sim of VAE embeddings for 50 CSL-Daily samples; report mean/std/percentile distribution
+
+**Phase F2: Targeted Fixes (based on F1 diagnosis)**
+- **If H2 confirmed (high density)**: 
+  - [ ] **F2-A**: Apply SignCL-style temporal contrastive within VAE embedding sequences (adjacent=positive, distant=negative) before LM fine-tune
+  - This is a 1-GPU, ~4h run; add as R019 in tracker
+- **If H3 confirmed (metric bug)**:
+  - [ ] **F2-B**: Fix metric computation; re-evaluate R003/R006 checkpoints without retraining
+- **If H1 confirmed (global vs. local)**:
+  - [ ] **F2-C**: Frame-level contrastive: align each sign frame embedding to its gloss-label text (requires CSL-Daily gloss annotations — check if available)
+
+**Phase F3: New Direction — ST-GCN VAE Encoder (PRIMARY)**
+> Pseudo-gloss direction is abandoned. Primary architectural hypothesis: Conv1d encoder is too naive for SMPL-X pose.
+
+Data format note: our 133-dim input is SMPL-X axis-angle rotations (≈41 joints × 3). Reshape to [N_joints, 3] per frame → apply graph convolution using SMPL-X kinematic tree as adjacency.
+
+- [ ] **F3-A**: Implement ST-GCN encoder for VAE
+  - Shared variant: single ST-GCN on all joints with SMPL-X tree adjacency
+  - Or Uni-Sign-style: separate sub-graph GCN per body / lhand / rhand (matches existing 3-VAE split)
+  - Output: [T', code_dim=512] → same interface as Conv1d encoder; LFQ quantizer unchanged
+- [ ] **F3-B**: Re-train body/hand VAEs with ST-GCN encoder (same reconstruction + LFQ losses)
+- [ ] **F3-C**: Re-run M2 (contrastive+mT5 vs. baseline mT5) on new embeddings; check if csl_BLEU4 breaks through ~5
+
+### New Success Criterion
+
+- **Phase F1 success**: Confirm primary failure mode (temporal density via R015, metric bug via code inspection)
+- **Phase F2 success**: Temporal contrastive fix or metric fix → at least one run at csl_BLEU4 ≥ 3.0
+- **Phase F3 success**: ST-GCN encoder → csl_BLEU4 ≥ 5.0 (approaching unbiased GFSLT-VLP CSL-Daily baseline ~10-12)
+- **Paper-ready**: csl_BLEU4 ≥ 10 with ablation confirming encoder architecture is the critical variable
+
+### Updated Claim Under Investigation
+
+**Old**: "Contrastive pre-training of sign projection (sequence-level) enables m2t generalization."
+→ **FALSIFIED** by M2.
+
+**New (post-replan)**: "The Conv1d VAE encoder is architecturally insufficient for sign pose — it destroys the skeletal graph structure inherent to SMPL-X data. A graph-structured encoder (ST-GCN on the SMPL-X kinematic tree) produces richer, more discriminative embeddings that enable downstream SLT."
+
+**New working hypothesis**: "Sign-to-text translation requires *temporal* rather than *global* sign-text alignment. Sequence-level contrastive pre-training is insufficient because: (1) it aligns global summaries, not per-frame decodable representations; (2) VAE embeddings have high temporal density that makes individual frame discrimination degenerate without explicit temporal contrastive regularization."
+
+This hypothesis leads to a cleaner contribution if confirmed: **temporal contrastive alignment (frame-level, intra-sequence) is the missing ingredient**, not global sentence-level alignment.

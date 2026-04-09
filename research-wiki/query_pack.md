@@ -2,7 +2,7 @@
 
 > Compressed summary for /idea-creator. Auto-generated. Max 8000 chars.
 
-Last generated: 2026-04-08T00:00:00Z
+Last generated: 2026-04-09T12:00:00Z
 
 ---
 
@@ -17,7 +17,13 @@ Build a **Sign Language Autoregressive Model**: a unified model for sign generat
 **G1 — Tokenizer LM-Compatibility** ★★★ [unresolved, 2 linked ideas, 1 failed exp]
 What makes a sign tokenizer/embedding suitable for downstream LM — not just good reconstruction? Better reconstruction (claim:C1) did NOT improve LM generalization (claim:C2). Criteria for LM-friendly tokenization are unknown. No existing SL paper addresses this directly.
 
-**G2 — Full-Train Generalization Failure** ★★★ [unresolved, 2 linked ideas, 2 failed exps]
+**G5 — VAE-Embedding vs. Video-Encoder Gap** ★★★ [NEW, unresolved]
+Field SOTA (GFSLT-VLP + SignCL) reaches ~12 B@4 on CSL-Daily using S3D video encoder. Our VAE-embedding pipeline achieves ~1.7 B@4. 10 B@4 gap unexplained. If VAE compression loses information critical for translation (vs. frame-level S3D), the LM is the wrong target.
+
+**G6 — Temporal Representation Density in VAE Embeddings** ★★★ [NEW, unresolved]
+SignCL (NeurIPS 2024) shows gloss-free video encoders have 92.59% semantically dense representations → adjacent frames near-identical → LM can't decode. Our VAE embeddings may have the same or worse density. Sequence-level InfoNCE (M2) cannot fix temporal density.
+
+**G2 — Full-Train Generalization Failure** ★★★ [unresolved, 2 linked ideas, 3 failed exps]
 Both Qwen (decoder-only) and mT5 (seq2seq) fail full-train generalization: train loss ↓, val ppl ↑, test output semantically unrelated to GT. Pipeline is correct (exp:002). Motion IS used (claim:C4). VAE embeddings ARE discriminative (claim:C5). Root cause unknown. Candidate causes: data volume, training objective misalignment, task interference, token distribution structure.
 
 **G3 — Unified Multi-Task AR at Current Data Scale** ★★ [unresolved, 1 linked idea]
