@@ -1,0 +1,40 @@
+# Hand VAE with ST-GCN encoder (45-dim input = 15 joints × 3, no extra dims)
+# Drop-in replacement for hand256_lfq4.yaml — same quantizer/decoder, new encoder.
+#
+# Encoder: STGCNEncoder
+#   - num_joints=15 (5 fingers × 3 joints each)
+#   - feat_per_joint=3 (axis-angle)
+#   - adj="hand" (finger chains + palm base connections)
+#   - extra_dims = 45 - 45 = 0
+target: mGPT.archs.mgpt_vq.VQVae
+params:
+  quantizer: 'lfq'
+  num_quantizers: 4
+  code_num: 256
+  code_dim: 512
+  use_contact: true
+  num_contact_classes: 3
+  lfq_ste_temperature: 1.0
+  lfq_ste_temperature_end: 0.1
+  lfq_entropy_loss_weight: 0.1
+  lfq_entropy_global_weight: 1.0
+  lfq_entropy_local_weight: 1.0
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  norm: None
+  activation: 'relu'
+  nfeats: 45
+  ablation: ${ABLATION}
+  # ST-GCN encoder
+  encoder_type: 'stgcn'
+  num_joints: 15
+  feat_per_joint: 3
+  adj: 'hand'
+  n_gcn_layers: 2
+  gcn_hidden: 128
+  gcn_out: 512
+  temporal_kernel_size: 9

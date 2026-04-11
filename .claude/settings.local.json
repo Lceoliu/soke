@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python3:*)",
       "WebSearch",
-      "Bash(tmux capture-pane:*)"
+      "Bash(tmux capture-pane:*)",
+      "Bash(conda run:*)"
     ]
   }
 }

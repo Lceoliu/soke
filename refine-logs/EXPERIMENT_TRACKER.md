@@ -21,6 +21,11 @@
 | R017 | M5 | B5 | Cross-signer BLEU4 | Evaluate R003 on per-signer held-out subset | CSL-Daily | test (cross-signer) | BLEU4 per signer | NICE | TODO | Use same signer split from exp:005 |
 | R018 | M6 | B4 | Architecture: contrastive + Qwen m2t | Contrastive pre-train → Qwen-0.5B LoRA fine-tune, m2t only | CSL-Daily | test | BLEU4, ROUGE-L | NICE | TODO | Tests if fix is seq2seq-specific or general; run after B1 success |
 
+| R019 | F1-B | — | Temporal density audit | Within-sample adjacent cosine_sim of VAE embeddings (50 CSL train samples) | CSL-Daily | train (50 samples) | cosine_sim distribution | MUST | DONE | H2 UNLIKELY ✓: mean adj sim=0.4595 (< 0.70 threshold), frac>0.99=0.000; lhand p90=0.84 but overall fine. Compression=4.05×. Output: experiments/analysis/temporal_density_audit/ |
+| R020 | F3-B | F3 | Re-train body VAE with ST-GCN encoder | ST-GCN body VAE (43-dim, 10 joints, body adj) | how2sign_csl_phoenix | train/val | MRMetrics (recon) | MUST | DONE | Finished 2026-04-10 03:04. Final loss=0.049 (E119). csl_MPVPE_PA_all: 25.79→14.72 (-43%), csl_MPJPE_hand: 42.39→24.32 (-43%). Checkpoint: experiments/mgpt/debug--VAE_SIGN_FINETUNE_STGCN/checkpoints/last.ckpt |
+| R021 | F3-B | F3 | Re-train hand VAEs with ST-GCN encoder | ST-GCN hand VAE (45-dim, 15 joints, hand adj) — body+hands co-trained in R020 | how2sign_csl_phoenix | train/val | MRMetrics (recon) | MUST | DONE | Co-trained with R020 (same run). Best hand ckpt: min-csl_MPJPE_PA_handepoch=104.ckpt |
+| R022 | F3-C | F3 | M2 re-run: mT5 fine-tune on ST-GCN embeddings | mT5-base LoRA on ST-GCN VAE embeddings (R020/R021 checkpoint) | CSL-Daily | val/test | BLEU4, ROUGE-L, WER | MUST | DONE ✗ | F3 GATE FAILED: peak csl_BLEU4=0.993 (gate≥5.0). WORSE than Conv1d baseline 1.742. val_m2t_loss diverges 4.12→14.97. G8 confirmed: reconstruction tokens ≠ semantic tokens. |
+
 ---
 
 ## Decision Gates

@@ -1,12 +1,13 @@
 # Partially from https://github.com/Mael-zys/T2M-GPT
 
-from typing import Union
+from typing import Union, Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from .tools.resnet import Resnet1D
 from .tools.quantize_lfq import ResidualLFQ
+from .tools.st_gcn import STGCNEncoder
 
 
 class VQVae(nn.Module):
@@ -33,15 +34,41 @@ class VQVae(nn.Module):
         self.nfeats = nfeats
         self.num_quantizers = int(num_quantizers)
 
-        self.encoder = Encoder(nfeats,
-                               output_emb_width,
-                               down_t,
-                               stride_t,
-                               width,
-                               depth,
-                               dilation_growth_rate,
-                               activation=activation,
-                               norm=norm)
+        # ST-GCN encoder support: if encoder_type="stgcn" is passed in kwargs,
+        # use STGCNEncoder instead of the default Conv1d Encoder.
+        encoder_type = str(kwargs.get("encoder_type", "conv1d")).lower()
+        if encoder_type == "stgcn":
+            stgcn_kwargs = {
+                k: kwargs[k]
+                for k in (
+                    "num_joints", "feat_per_joint", "adj",
+                    "n_gcn_layers", "gcn_hidden", "gcn_out",
+                    "temporal_kernel_size",
+                )
+                if k in kwargs
+            }
+            self.encoder = STGCNEncoder(
+                input_emb_width=nfeats,
+                output_emb_width=output_emb_width,
+                down_t=down_t,
+                stride_t=stride_t,
+                width=width,
+                depth=depth,
+                dilation_growth_rate=dilation_growth_rate,
+                activation=activation,
+                norm=norm,
+                **stgcn_kwargs,
+            )
+        else:
+            self.encoder = Encoder(nfeats,
+                                   output_emb_width,
+                                   down_t,
+                                   stride_t,
+                                   width,
+                                   depth,
+                                   dilation_growth_rate,
+                                   activation=activation,
+                                   norm=norm)
 
         self.decoder = Decoder(nfeats,
                                output_emb_width,
