@@ -107,12 +107,50 @@ python scripts/eval_m2t_bleu.py \
 
 ---
 
+## R025: G11 连续嵌入 Oracle — DONE ✓ (2026-04-11)
+
+**实验**：用 `encode_continuous()` 做 NN 检索（余弦相似度），测量 mT5 真实输入空间的理论上界。
+
+| VAE | Oracle BLEU4 | Oracle BLEU1 | Mean NN Cosine | P90 NN Cosine |
+|-----|-------------|-------------|---------------|--------------|
+| Conv1d continuous | **1.890** | 15.588 | 0.8693 | 0.9169 |
+| ST-GCN continuous | **1.652** | 15.133 | 0.8815 | 0.9288 |
+| **mT5 baseline (R006)** | *1.742* | *16.83* | — | — |
+
+**关键发现**：
+1. **连续嵌入 oracle ≈ mT5 实际训练结果**（±0.15 BLEU4）→ mT5 已接近其输入嵌入所允许的理论上界
+2. **平均 NN 余弦 = 0.87（很高！）**：从 2000 个训练样本中找到的"最近邻"余弦相似度高达 0.87，但翻译仍然错误（pred ≠ ref） → 不同手语句子的连续嵌入在余弦空间中高度密集，无法通过 NN 检索区分
+3. **与 62% 分类器的矛盾**（重要分析）：cross-signer 分类器能以 62% 准确率区分 1024-way，但 oracle NN 仅给出 1.9 BLEU4。矛盾的解释：分类器是**经过训练**的决策边界，能从噪声中提取细粒度判别信息；而 oracle 用的是**原始余弦距离**，在高密度空间中信噪比太低。换言之：判别信息**存在**但**很难通过简单线性变换提取**。
+
+**新诊断**（G11 更新）：
+- ~~H1（全局对齐 ≠ 局部可解码性）~~ → 已更精确：原始嵌入空间句间密度太高，mT5 LoRA 微调已几乎达到上界
+- ~~H4（数据量不足）~~ → 有待验证（R026），但即使增加数据，如果嵌入本身不可区分，增加训练样本帮助有限
+- **新 H5（嵌入空间语义密度）**：连续嵌入的句间语义密度是核心瓶颈；需要让相同语义的手语在嵌入空间更近、不同语义的更远 → 需要序列级判别性预训练（如 InfoNCE 在序列级而非批次级）
+
+**输出**：`experiments/analysis/g2_oracle_continuous/`
+
+---
+
+## R026: 数据量学习曲线 — RUNNING (2026-04-11)
+
+**H4 验证**：mT5 在 1k/5k/10k/18k 训练样本下的 BLEU4 学习曲线。
+- 1k：`configs/soke_mt5_csl_scale1k.yaml`
+- 5k：`configs/soke_mt5_csl_scale5k.yaml`
+- 10k：`configs/soke_mt5_csl_scale10k.yaml`
+- 18k（全量）：R006 已完成，best BLEU4=1.742
+
+**Log**：`experiments/r026_scale_run.log`
+
+---
+
 ## Summary
 
-- **4/22** must-run experiments completed (M0 sanity, M1, M2 ×2 [FAILED])
-- M2 gate FAILED: contrastive pre-training did not enable m2t generalization
-- Active plan: Phase F1 (diagnosis) + Phase F3 (ST-GCN encoder — PRIMARY)
-- Ready for /auto-review-loop: NO — awaiting F3 results
+- **7/22+ 实验完成**（R001/R002 M0/M1, R003/R006 M2, R019, R020/R021, R022 ✗, R023/R024 [前提有误], R025）
+- M2 gate FAILED；F3 gate FAILED；G1 诊断前提有误
+- **R025 关键结论**：连续嵌入 oracle ≈ mT5 实际结果（1.9 ≈ 1.7）；嵌入空间句间余弦密度 = 0.87，是真正瓶颈
+- **当前核心问题**：连续 VAE 嵌入的**句间语义密度**太高，不同手语句子在余弦空间无法区分
+- **R026 运行中**：验证 H4（数据量是否有边际改善）
+- Ready for /auto-review-loop: NO — 等待 R026 完成
 
 ---
 
@@ -209,3 +247,54 @@ Gap: Conv1d (1.742 BLEU4) > ST-GCN (0.993 BLEU4) despite ST-GCN having better re
 - `PRETRAINED_VAE` in F3-B config points to Conv1d checkpoint; encoder weights
   will NOT load (shape mismatch) — decoder + quantizer will initialize from it;
   the encoder trains from scratch. This is intentional.
+
+---
+
+## G1 Diagnostics — DONE ✓ (2026-04-11) ⚠️ 分析前提有误，见下方更正
+
+### R023: G1-a Codebook Utilization
+
+| VAE | Part | Utilization | Entropy (bits) | Entropy% | Dead Codes | Top-10 Conc. |
+|-----|------|------------|---------------|---------|-----------|-------------|
+| Conv1d | body | **100%** | 6.97 / 7.00 | **99.6%** | 0 | 11.5% |
+| Conv1d | lhand | **100%** | 7.41 / 8.00 | **92.6%** | 0 | 24.9% |
+| Conv1d | rhand | **100%** | 7.98 / 8.00 | **99.8%** | 0 | 5.4% |
+| ST-GCN | body | **100%** | 6.98 / 7.00 | **99.8%** | 0 | 10.1% |
+| ST-GCN | lhand | **100%** | 7.27 / 8.00 | **90.8%** | 0 | 27.9% |
+| ST-GCN | rhand | **100%** | 7.97 / 8.00 | **99.7%** | 0 | 5.7% |
+
+**数据有效**，但与 mT5 无关——见下方更正。
+
+### R024: G1-c Oracle NN Decoder
+
+| VAE | Oracle BLEU4 | Oracle BLEU1 | Exact Retrieval Rate |
+|-----|-------------|-------------|---------------------|
+| Conv1d | **0.195** | 10.21 | 0.0% |
+| ST-GCN | **0.121** | 10.83 | 0.0% |
+
+**数据有效**，但测量的是离散 LFQ token 空间的上界——见下方更正。
+
+---
+
+### ⚠️ G1 更正 (2026-04-11)
+
+**前提错误：R023/R024 测量的是 LFQ 离散 token 空间，但 mT5 实际使用的是连续嵌入。**
+
+mT5 的输入管线（见 `docs/research_history_zh.md` 第 6 章阶段三）：
+```
+pose (133-dim) → VAE.encode_continuous() → 连续隐变量 (1536-dim) → MLP projection → mT5 inputs_embeds
+```
+`encode_continuous()` 返回的是**量化前**的连续隐变量，**不经过 LFQ codebook**。R023/R024 调用的是 `vae.encode()`（离散 token），这对 mT5 的分析完全无关。
+
+**R023 正确结论**（有限）：LFQ codebook 没有坍缩（对 Qwen 路径仍有参考价值）。  
+**R024 正确结论**（有限）：离散 LFQ token 的检索上界几乎为零，但这不是 mT5 失败的原因——mT5 根本不看这些 token。
+
+**原 "G1 Verdict" 中的结论已撤回**：
+- ~~"Root cause confirmed: LFQ tokenizer is the bottleneck"~~ → 不适用于 mT5
+- ~~"Decision → G2-a (continuous embeddings)"~~ → mT5 已经使用连续嵌入，这个"解法"已是现状
+
+**已有证据表明连续 VAE 嵌入是有区分能力的**（见 `docs/research_history_zh.md` 第 8.5 节）：跨签名者 VAE 分类器在 1024-way 任务上测试准确率 62%，证明连续嵌入已编码身份/语义信息。
+
+**真正的开放问题**：为什么具有区分能力的连续 VAE 嵌入，经过 MLP projection + mT5 微调后仍无法实现有效翻译？  
+→ 候选假说：H1（全局 InfoNCE 对齐 ≠ 每帧可解码性）、H4（数据量不足，18k vs 100k+）  
+→ 下一步见更新后的实验方案。

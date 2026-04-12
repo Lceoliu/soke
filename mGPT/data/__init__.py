@@ -50,8 +50,17 @@ class BASEDataModule(pl.LightningDataModule):
     @property
     def train_dataset(self):
         if self._train_dataset is None:
-            self._train_dataset = self.Dataset(split=self.cfg.TRAIN.SPLIT,
-                                               **self.hparams)
+            ds = self.Dataset(split=self.cfg.TRAIN.SPLIT, **self.hparams)
+            # Optional hard cap on training set size (for data-scale experiments).
+            # Set TRAIN.SUBSET_N in config to an integer > 0 to enable.
+            subset_n = int(self.cfg.TRAIN.get("SUBSET_N", 0) or 0)
+            if 0 < subset_n < len(ds):
+                rng = np.random.default_rng(42)
+                indices = rng.choice(len(ds), size=subset_n, replace=False).tolist()
+                ds = Subset(ds, sorted(indices))
+                print(f'[BASEDataModule] TRAIN.SUBSET_N={subset_n}: '
+                      f'using {len(ds)}/{len(ds.dataset)} train samples')
+            self._train_dataset = ds
         return self._train_dataset
 
     @property
