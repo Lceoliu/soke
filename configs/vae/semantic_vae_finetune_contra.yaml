@@ -1,0 +1,104 @@
+# R027 — Semantic VAE Encoder Fine-tuning (Plan A: Contrastive Dual Loss)
+#
+# Fine-tunes the Conv1d VAE encoder with a combined reconstruction + InfoNCE loss.
+# The decoder, LFQ quantizer, and quantize_out are frozen.
+# Only encoder + quantize_in are trainable.
+#
+# This config is NOT used with train.py (the standard PyTorch Lightning runner).
+# It is passed directly to scripts/train_semantic_vae_finetune.py via --cfg.
+#
+# Usage:
+#   python scripts/train_semantic_vae_finetune.py \
+#       --cfg configs/vae/semantic_vae_finetune_contra.yaml \
+#       --output_dir experiments/semantic_vae_finetune_R027 \
+#       --epochs 50 \
+#       --batch_size 128 \
+#       --lr 3e-5 \
+#       --lambda_recon 1.0 \
+#       --lambda_contra 0.5
+#
+# Sanity check (fast, no GPU needed for a few epochs):
+#   python scripts/train_semantic_vae_finetune.py \
+#       --cfg configs/vae/semantic_vae_finetune_contra.yaml \
+#       --output_dir experiments/semantic_vae_finetune_sanity \
+#       --sanity
+
+NAME: SEMANTIC_VAE_FINETUNE_CONTRA
+ACCELERATOR: 'gpu'
+PRECISION: '16-mixed'
+NUM_NODES: 1
+DEVICE: [0]
+
+TRAIN:
+  STAGE: vae
+  NUM_WORKERS: 4
+  BATCH_SIZE: 128
+  END_EPOCH: 50
+  RESUME: ''
+  # Pre-trained Conv1d checkpoint (body + hands co-trained, lfq4 variant)
+  PRETRAINED_VAE: 'experiments/mgpt/VAE_SIGN_FINETUNE_LFQ4_ACC/checkpoints/last.ckpt'
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 3.0e-5     # lower than original VAE training (1e-4) to avoid destroying encoder
+      betas: [0.9, 0.99]
+      weight_decay: 1.0e-4
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 50
+      eta_min: 1.0e-7
+
+DATASET:
+  target: mGPT.data.H2S.H2SDataModule
+  H2S:
+    DATASET_NAME: how2sign_csl
+    ROOT: data/How2Sign
+    CSL_ROOT: data/CSL-Daily
+    PHOENIX_ROOT: data/Phoenix_2014T
+    MEAN_PATH: data/CSL-Daily/mean.pt
+    STD_PATH: data/CSL-Daily/std.pt
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 20
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+    STD_TEXT: False
+
+# Contrastive-specific hyperparameters (overridden via CLI --lambda_contra etc.)
+CONTRASTIVE:
+  LAMBDA_RECON: 1.0      # SmoothL1 reconstruction weight (keeps encoder from collapsing)
+  LAMBDA_CONTRA: 0.5     # InfoNCE contrastive weight (inject semantic discrimination)
+  TEMPERATURE: 0.07      # Initial temperature (learnable)
+  PROJ_DIM: 768          # Projection head output dimension (matches mT5-base d_model)
+  ORACLE_EVAL_EVERY: 5   # Compute oracle BLEU4 every N epochs
+
+# Oracle evaluation thresholds (gate for R028)
+SUCCESS_GATE:
+  MIN_ORACLE_BLEU4: 3.0  # Must exceed this to proceed to R028
+  MAX_NN_COSINE: 0.78    # Mean NN cosine must drop below this
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.default}
+    motion_vae: ${vq.re96}
+    hand_vae_cfg: ${vq.hand192}
+    rhand_vae_cfg: ${vq.hand192}
+
+lm:
+  mt5_base:
+    params:
+      model_path: 'google/mt5-base'
+
+LOGGER:
+  TYPE: ['wandb']
+  WANDB:
+    params:
+      project: SLG_SEMANTIC_VAE
+      offline: true

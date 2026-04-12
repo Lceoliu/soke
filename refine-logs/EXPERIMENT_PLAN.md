@@ -254,3 +254,94 @@ Data format note: our 133-dim input is SMPL-X axis-angle rotations (≈41 joints
 **New working hypothesis**: "Sign-to-text translation requires *temporal* rather than *global* sign-text alignment. Sequence-level contrastive pre-training is insufficient because: (1) it aligns global summaries, not per-frame decodable representations; (2) VAE embeddings have high temporal density that makes individual frame discrimination degenerate without explicit temporal contrastive regularization."
 
 This hypothesis leads to a cleaner contribution if confirmed: **temporal contrastive alignment (frame-level, intra-sequence) is the missing ingredient**, not global sentence-level alignment.
+
+---
+
+## Phase G: Semantic VAE Encoder Fine-tuning — Activated 2026-04-12
+
+> **Root cause (R025)**: mT5 oracle BLEU4=1.890 ≈ mT5 baseline=1.742. Mean NN cosine=0.87 across different sign sentences.
+> mT5 is already near its theoretical ceiling. The bottleneck is the VAE encoder, not the LM.
+> The VAE was trained purely for reconstruction → "acoustic class" embeddings (sign-language equivalent of EnCodec).
+> Fix: inject semantic training signal into the VAE encoder to reduce inter-sentence cosine similarity.
+
+### Diagnosis Recap
+
+| Evidence | Finding |
+|---|---|
+| R025: oracle BLEU4=1.890, mT5=1.742 | mT5 already near theoretical ceiling |
+| R025: mean NN cosine=0.87 | Different sign sentences are nearly indistinguishable in embedding space |
+| R026: 10k→18k ×2.3 jump | More data has marginal benefit, already near oracle |
+| G8 confirmed | ST-GCN encoder alone (without semantic objective) did not help (R022 BLEU4=0.993) |
+
+### Plan A: Contrastive VAE Encoder Fine-tuning (PRIMARY — R027)
+
+**Hypothesis**: Injecting InfoNCE sign↔text loss into VAE encoder training pushes the encoder to produce embeddings where different sign sentences are more separable in cosine space. mT5 downstream performance is constrained by oracle ceiling; raising the ceiling (lower mean NN cosine) should raise mT5 BLEU4.
+
+**Architecture**:
+```
+Frozen: VAE decoder, LFQ quantizer, quantize_out (all three VAEs)
+Trainable: VAE encoder, quantize_in (all three VAEs)
+
+Loss = λ_recon × SmoothL1(reconstruct(pose), pose)
+      + λ_contra × InfoNCE(mean_pool(encode_continuous(pose)), mT5_encode(text))
+
+λ_recon=1.0, λ_contra=0.5 (default; ablate 0.1, 1.0)
+```
+
+**Why freeze decoder/quantizer**: Reconstruction quality (claim:C1) is already good. We only need to improve the encoder's representation without breaking the VAE. The quantizer is downstream of the encoder — by keeping it frozen and only training the encoder, we ensure the codebook usage patterns remain valid.
+
+**Validation metric (R025-style re-run after fine-tuning)**:
+- Run oracle BLEU4 analysis with fine-tuned encoder
+- Target: oracle BLEU4 > 5.0 (vs. current 1.890)
+- Target: mean NN cosine < 0.70 (vs. current 0.87)
+- Then re-run mT5 fine-tune (R028) on improved embeddings
+
+**Script**: `scripts/train_semantic_vae_finetune.py`
+**Config**: `configs/vae/semantic_vae_finetune_contra.yaml`
+
+**Success criterion**: After R027 encoder fine-tuning, oracle BLEU4 > 3.0 AND mean NN cosine < 0.78.
+**Failure criterion**: oracle BLEU4 < 2.0 or training loss diverges → Plan B.
+
+---
+
+### Plan B: Masked Sign Prediction (SECONDARY — R029, if Plan A fails)
+
+**Hypothesis**: Inspired by HuBERT — self-supervised masked prediction forces the encoder to produce representations that distinguish individual sign tokens, without requiring text supervision. This is architecture-level semantic pretraining.
+
+**Method**:
+- Mask ~15% of input frames with learnable mask token before VAE encoder
+- Add a lightweight prediction head: predict the original masked frame's LFQ code
+- Cross-entropy loss on masked positions (sign-HuBERT style)
+- Does not require parallel text annotations → can use unlabeled sign pose data
+
+**Limitation**: Requires either (a) a large unlabeled pose corpus, or (b) CSL-Daily train set as pseudo-unlabeled data. With only 18k samples, may overfit. Treat as backup if Plan A fails.
+
+---
+
+### Plan C: Semantic/Acoustic Split — Moshi-Style (EXPLORATORY — R030)
+
+**Hypothesis**: Instead of a single quantizer, use a 2-level design:
+- Level 1 (L1): semantic quantizer trained with contrastive loss → captures *what sign* is made
+- Level 2 (L2): reconstruction quantizer → captures fine-grained kinematics
+
+The mT5 downstream model uses only L1 tokens/embeddings. L2 is used only for motion generation.
+
+**This is a full redesign of the tokenizer** — implement only if Plans A and B both fail and a new architecture is justified.
+
+---
+
+### Phase G Run Order
+
+| Run | Plan | Purpose | Input | Key Metric | Status |
+|---|---|---|---|---|---|
+| R027 | A | Fine-tune VAE encoder with contrastive loss | Pre-trained Conv1d VAE (R006 config) | oracle BLEU4 after fine-tune | TODO |
+| R027-oracle | A | R025-style oracle re-run on R027 encoder | R027 checkpoint | oracle BLEU4, mean NN cosine | TODO |
+| R028 | A | mT5 fine-tune on R027 embeddings | R027 checkpoint | BLEU4 (CSL-Daily test) | TODO |
+| R029 | B | Masked sign prediction VAE | CSL-Daily train | oracle BLEU4 | TODO (if R027 fails) |
+| R030 | C | Semantic/acoustic split VAE | Full redesign | oracle BLEU4 | TODO (if R027+R029 fail) |
+
+### Phase G Success Criterion
+
+- **R027 success gate**: oracle BLEU4 > 3.0 AND mean NN cosine < 0.78 → proceed to R028
+- **R028 success gate**: mT5 BLEU4 > 3.0 on CSL-Daily test → meaningful improvement; target ≥ 5.0 for paper-worthy result
+- **Paper ready**: BLEU4 ≥ 5.0 with ablation confirming semantic VAE encoder training is the critical variable

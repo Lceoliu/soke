@@ -4,7 +4,12 @@
       "Bash(python3:*)",
       "WebSearch",
       "Bash(tmux capture-pane:*)",
-      "Bash(conda run:*)"
+      "Bash(conda run:*)",
+      "Skill(auto-review-loop)",
+      "Bash(tmux ls:*)",
+      "Bash(nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader)",
+      "Bash(tmux new-session:*)",
+      "Bash(tmux send-keys -t r027_sanity 'CUDA_VISIBLE_DEVICES=0 python scripts/train_semantic_vae_finetune.py \\\\:*)"
     ]
   }
 }
